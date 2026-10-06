@@ -111,6 +111,13 @@ pub struct Ticked {
     /// Merges performed. Zero is the normal reading until a partition has roughly
     /// `4 × seal_max_records` ops; see [`CatalogStore::tick`].
     pub merged: usize,
+    /// Part files and substrate objects the manifest no longer references, deleted.
+    ///
+    /// ⚠ This is reported separately from `merged` on purpose. A merge that cuts the
+    /// part count while raising bytes on disk is a merge that costs storage instead of
+    /// saving it, and a single combined number cannot show that. It is exactly what was
+    /// measured before reclaim was wired in: 25 parts → 4, and disk **+42%**.
+    pub reclaimed: usize,
 }
 
 /// Sealed-part counts per dataset.
@@ -403,6 +410,33 @@ impl CatalogStore {
     /// partition. Past that point parts accumulate monotonically with nothing merging
     /// them, which is the shape that filled a prod PVC while the writer reported
     /// `Ready`.
+    ///
+    /// # And then reclaims what the merge superseded
+    ///
+    /// ⚠⚠ Driving merges without reclaiming is not a fix, it is a trade: measured on
+    /// 200 writes at `seal_max_records = 8`, one `tick()` cut the manifest from 25 parts
+    /// to **4** while part files on disk went 49 → 56 and bytes **94,784 → 189,568**.
+    /// The merge doubled storage. `reclaim_orphans` is caller-owned like the other two,
+    /// and `ehdb-l0` documents it as deleting precisely "the superseded source parts a
+    /// merge (L0.3) leaves behind".
+    ///
+    /// It runs **after** the merges in the same tick so the manifest swap has already
+    /// dropped the sources — reclaiming first would find nothing unreferenced and
+    /// report a healthy `0`.
+    ///
+    /// # The two lifecycle calls this deliberately does NOT make
+    ///
+    /// * **`apply_retention`** drops whole parts below a sequence floor. A catalog is
+    ///   folded latest-op-wins over *every* op in the log, so a resource whose only
+    ///   `Registered` op fell below the floor would silently vanish from `latest()`
+    ///   while its later attribute ops survived. Retention is correct for an event
+    ///   stream and wrong for a state log. Never call it here.
+    /// * **`flush_and_wait_uploads`** is unnecessary for a graceful close:
+    ///   `L0Engine::drop` sets `upload_tx = None` and joins the uploader thread, whose
+    ///   loop is `while let Ok(job) = rx.recv()` — an mpsc receiver drains everything
+    ///   already queued before it sees the disconnect. Verified in `ehdb-l0`
+    ///   `engine.rs:654` / `:1701`. It remains the right call before a cold-load
+    ///   equality check, which this store does not perform.
     pub fn tick(&mut self) -> Result<Ticked> {
         let mut sealed = 0;
         sealed += self.entities.seal_aged_parts()?;
@@ -416,7 +450,19 @@ impl CatalogStore {
         merged += self.relations.run_pending_merges()?;
         merged += self.types.run_pending_merges()?;
 
-        Ok(Ticked { sealed, merged })
+        // After the merges, never before: the manifest swap inside `run_pending_merges`
+        // is what makes the source parts unreferenced in the first place.
+        let mut reclaimed = 0;
+        reclaimed += self.entities.reclaim_orphans()?;
+        reclaimed += self.attributes.reclaim_orphans()?;
+        reclaimed += self.relations.reclaim_orphans()?;
+        reclaimed += self.types.reclaim_orphans()?;
+
+        Ok(Ticked {
+            sealed,
+            merged,
+            reclaimed,
+        })
     }
 
     /// Sealed parts per partition on each dataset, for observability and tests.
