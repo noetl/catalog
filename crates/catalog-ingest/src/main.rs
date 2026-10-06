@@ -8,6 +8,7 @@
 //! catalog stats  --store <dir>
 //! catalog list   --store <dir> [--type playbook]
 //! catalog show   --store <dir> --path <catalog/path>
+//! catalog who-uses --store <dir> --attr <attribute.name>
 //! ```
 //!
 //! ⚠ `tick --every` takes `--max-ticks` because an unbounded loop with no cap is the
@@ -28,6 +29,7 @@ USAGE:
   catalog stats  --store <dir>
   catalog list   --store <dir> [--type NAME]
   catalog show   --store <dir> --path <catalog/path>
+  catalog who-uses --store <dir> --attr <attribute.name>
 
 NOTES:
   --source git:REPO@REF reads the REF, not the working tree. Prefer it: a stale
@@ -201,6 +203,30 @@ fn run(args: &[String]) -> Result<(), String> {
                 "⚠ a full path listing needs an index this store does not yet keep; \
                  `show --path` reads one path. See noetl/ai-meta#427."
             );
+            Ok(())
+        }
+        // The reverse lookup. The query this catalog exists for: rotating a keychain
+        // alias means knowing which resources break.
+        "who-uses" => {
+            let store = open_store(args)?;
+            let attr = flag(args, "--attr").ok_or("--attr <attribute.name> is required")?;
+            let paths = store
+                .resources_with_attribute(attr)
+                .map_err(|e| format!("resources_with_attribute: {e}"))?;
+            // ⚠ The count IS the headline, because the hazard here is a partial
+            // answer that looks complete — a naive fold returned 1 of 49, and 0 of 48
+            // once a tombstone was the latest op under the shared key.
+            println!("{attr}: {} resource(s)", paths.len());
+            for p in &paths {
+                println!("  {p}");
+            }
+            if paths.is_empty() {
+                println!(
+                    "⚠ nothing carries {attr}. Check the spelling, and whether this \
+                     store has been ingested — an empty reverse answer and an \
+                     un-ingested store look identical."
+                );
+            }
             Ok(())
         }
         "show" => {
