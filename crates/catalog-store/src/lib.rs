@@ -19,7 +19,7 @@ pub use datasets::{
     RelationDataset, RelationOp, RelationOpKind, TypeDataset, TypeOp, DATASET_C1_ENTITY,
     DATASET_C2_RELATION, DATASET_C3_ATTRIBUTE, DATASET_C4_TYPE,
 };
-pub use store::{CatalogStore, Registered, StoreConfig};
+pub use store::{CatalogStore, PartCounts, Registered, StoreConfig, Ticked};
 
 use std::collections::BTreeMap;
 
