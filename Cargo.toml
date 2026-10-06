@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/catalog-model"]
+members = ["crates/catalog-model", "crates/catalog-store"]
 resolver = "2"
 
 [workspace.package]
@@ -16,6 +16,16 @@ rust-version = "1.99.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+# EHDB is the storage backend — the catalog is the model and API over it.
+# ⚠ Both pins MUST move together: they share `ehdb-l0`, and two tags put two
+# `ehdb-l0` versions in one dependency graph. noetl/server's own Cargo.toml
+# records that as a real incident.
+# ⚠ NOT `ehdb-reference` — that is the older parallel lineage, is not what the
+# server links, and its election/fencing self-describe as non-authoritative.
+ehdb-l0 = { git = "https://github.com/noetl/ehdb", tag = "v0.4.5" }
+ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.4.5" }
+catalog-model = { path = "crates/catalog-model" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
