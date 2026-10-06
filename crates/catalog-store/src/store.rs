@@ -204,7 +204,23 @@ impl CatalogStore {
         self.entities.append_writer_assigned(op)
     }
 
+    /// Set an attribute, writing the forward row **and** its reverse-index row.
+    ///
+    /// Returns the **forward** op's sequence — that is the write a caller means when
+    /// it asks "what sequence did this land at". The reverse row is an index
+    /// artefact of the same logical write, not a second attribute.
+    ///
+    /// ⚠ The two appends are not atomic; `ehdb-l0` has no multi-append transaction.
+    /// The ordering is deliberate: **forward first**. If the process dies between
+    /// them the forward answer is complete and the reverse answer is missing one
+    /// entry — recoverable by replaying the forward rows. The other order would
+    /// leave the reverse index claiming a resource carries an attribute that the
+    /// forward read says it does not, which is a contradiction between two stores
+    /// and far worse to reason about.
     pub fn set_attribute(&mut self, path: &str, attr: Attribute) -> Result<u64> {
+        AttributeOp::assert_forward_path_is_not_a_reverse_key(path)
+            .map_err(ehdb_core::EhdbError::InvalidIdentifier)?;
+        let name = attr.name.clone();
         let op = AttributeOp {
             // Assigned by the engine in `append_writer_assigned`; see
             // `Dataset::assign_sort_key`. A placeholder here, never the real key.
@@ -212,10 +228,22 @@ impl CatalogStore {
             path: path.to_string(),
             op: AttributeOpKind::Set(Box::new(attr)),
         };
-        self.attributes.append_writer_assigned(op)
+        let forward_seq = self.attributes.append_writer_assigned(op)?;
+        self.write_reverse(path, &name, true)?;
+        Ok(forward_seq)
     }
 
+    /// Unset an attribute, and **tombstone** its reverse row.
+    ///
+    /// ⚠ The tombstone is the whole reason the reverse row carries a `live` flag
+    /// rather than being append-only-present. Without it, unsetting an attribute
+    /// would leave the resource in `resources_with_attribute` forever: the reverse
+    /// index would only grow, and "which resources use this credential" would
+    /// accumulate resources that stopped using it. That is a wrong answer that
+    /// never self-corrects.
     pub fn unset_attribute(&mut self, path: &str, name: &str) -> Result<u64> {
+        AttributeOp::assert_forward_path_is_not_a_reverse_key(path)
+            .map_err(ehdb_core::EhdbError::InvalidIdentifier)?;
         let op = AttributeOp {
             // Assigned by the engine in `append_writer_assigned`; see
             // `Dataset::assign_sort_key`. A placeholder here, never the real key.
@@ -223,6 +251,24 @@ impl CatalogStore {
             path: path.to_string(),
             op: AttributeOpKind::Unset {
                 name: name.to_string(),
+            },
+        };
+        let forward_seq = self.attributes.append_writer_assigned(op)?;
+        self.write_reverse(path, name, false)?;
+        Ok(forward_seq)
+    }
+
+    /// Append one reverse-index row. Shared by set and unset so the two paths
+    /// cannot drift in how they build the key.
+    fn write_reverse(&mut self, path: &str, name: &str, live: bool) -> Result<u64> {
+        let op = AttributeOp {
+            op_seq: 0,
+            // For a reverse row `path` is the ANSWER, not the key.
+            path: path.to_string(),
+            op: AttributeOpKind::Reverse {
+                index: crate::datasets::reverse_key(name),
+                path: path.to_string(),
+                live,
             },
         };
         self.attributes.append_writer_assigned(op)
@@ -352,14 +398,72 @@ impl CatalogStore {
     /// ⚠ This is where a copied `ProjectionStore` fold loses data silently.
     pub fn attributes(&self, path: &str) -> Result<BTreeMap<String, Attribute>> {
         let ops = self.attributes.read_index_after(path, 0)?;
-        let folded = fold_latest_by(ops, |o| o.op.name().to_string());
+
+        // ⚠ Reverse rows are excluded from the fold INPUT, not from its output.
+        //
+        // They live under a disjoint key space (`\u{1}attr/…`) and
+        // `read_index_after` matches the index key exactly, so none should arrive
+        // here. But if one ever did, its `name()` would equal a real attribute name
+        // and it would **shadow** that attribute in the fold — a wrong value, not a
+        // missing one. Dropping them before the fold means the worst case is a
+        // missing reverse row rather than a corrupted forward answer.
+        let forward: Vec<_> = ops.into_iter().filter(|o| !o.op.is_reverse()).collect();
+
+        let folded = fold_latest_by(forward, |o| o.op.name().to_string());
         Ok(folded
             .into_iter()
             .filter_map(|(name, op)| match op.op {
                 AttributeOpKind::Set(a) => Some((name, *a)),
                 AttributeOpKind::Unset { .. } => None,
+                // Unreachable: filtered above. Not `unreachable!()` — a panic in a
+                // read path is worse than returning the rest of a correct answer.
+                AttributeOpKind::Reverse { .. } => None,
             })
             .collect())
+    }
+
+    /// **Reverse lookup: every live resource carrying the attribute `name`.**
+    ///
+    /// The query this exists for: `uses_credential.adiona_actor` — rotating a
+    /// keychain alias means knowing which resources break. The forward index is
+    /// keyed by `path`, so answering it without a reverse index means reading every
+    /// path in the catalog.
+    ///
+    /// # ⚠ Why this is folded per PATH and not with `.last()`
+    ///
+    /// Every resource carrying the attribute shares **one** reverse key, so this is
+    /// the dataset's worst case for the `.last()` idiom documented on
+    /// [`crate::fold_latest_by`]. Measured on the real corpus before this was folded
+    /// correctly: `.last()` returned **1 path out of 49** — and returned it
+    /// *successfully*. A partial answer to "which resources use this credential" is
+    /// more dangerous than an empty one, because an empty answer gets investigated.
+    ///
+    /// Returns paths sorted, so a caller diffing two runs sees a stable order.
+    pub fn resources_with_attribute(&self, name: &str) -> Result<Vec<String>> {
+        let key = crate::datasets::reverse_key(name);
+        let ops = self.attributes.read_index_after(&key, 0)?;
+
+        // Fold per PATH: the latest op for each path under this key decides whether
+        // that path still carries the attribute.
+        let folded = fold_latest_by(ops, |o| match &o.op {
+            AttributeOpKind::Reverse { path, .. } => path.clone(),
+            // A forward row cannot appear under a reverse key (disjoint key spaces,
+            // exact-match read). Keyed by its own path so it cannot collapse other
+            // entries if it somehow did.
+            _ => o.path.clone(),
+        });
+
+        let mut out: Vec<String> = folded
+            .into_values()
+            .filter_map(|op| match op.op {
+                AttributeOpKind::Reverse {
+                    path, live: true, ..
+                } => Some(path),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        Ok(out)
     }
 
     /// Every live outgoing edge from `from_path`.

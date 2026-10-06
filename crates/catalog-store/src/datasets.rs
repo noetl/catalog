@@ -102,11 +102,56 @@ impl Dataset for EntityDataset {
 // c3 — attributes
 // ---------------------------------------------------------------------------
 
+/// The prefix that marks a `c3` row as a **reverse-index** row rather than a
+/// forward one.
+///
+/// `\u{1}` (SOH) is used deliberately: a reverse key must be impossible to collide
+/// with a real `metadata.path`, because `read_index_after` matches the index key by
+/// **exact string equality** (`ehdb-l0` `engine.rs:1489`). A path reading
+/// `attr/uses_tool.postgres` would otherwise silently answer a reverse query. A
+/// control character cannot appear in a YAML `metadata.path`, and
+/// [`AttributeDataset::index_key`] asserts a forward path never starts with it, so
+/// the two key spaces are disjoint by construction rather than by convention.
+pub const REVERSE_KEY_PREFIX: &str = "\u{1}attr/";
+
+/// The reverse index key for an attribute name.
+pub fn reverse_key(attribute_name: &str) -> String {
+    format!("{REVERSE_KEY_PREFIX}{attribute_name}")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AttributeOpKind {
     Set(Box<Attribute>),
-    Unset { name: String },
+    Unset {
+        name: String,
+    },
+    /// A **reverse-index** row: "the attribute named by `index` is live on `path`".
+    ///
+    /// Written alongside every forward `Set`, so that "every resource carrying
+    /// attribute X" is one indexed read instead of a scan over every path. The
+    /// motivating query is `uses_credential.<alias>` — rotating a keychain alias
+    /// means knowing which resources break, and the forward index (keyed by `path`)
+    /// cannot answer it.
+    ///
+    /// ⚠ `index` is stored rather than computed because [`Dataset::index_key`]
+    /// returns a borrowed `&str`; there is nowhere to borrow a freshly-formatted
+    /// key from.
+    ///
+    /// ⚠⚠ MANY paths share one reverse key. That makes this the dataset's worst
+    /// case for the `.last()` idiom: a naive reverse read returns **one** resource
+    /// out of however many carry the attribute — a *partial* answer that looks like
+    /// a successful one. Measured on the real corpus before the fix: **1 of 49**.
+    /// See [`crate::fold_latest_by`].
+    Reverse {
+        index: String,
+        path: String,
+        /// `true` mirrors a `Set`, `false` mirrors an `Unset`. A tombstone is
+        /// required: without it, unsetting an attribute would leave the resource
+        /// in the reverse answer forever, and the reverse index would only ever
+        /// grow.
+        live: bool,
+    },
 }
 
 impl AttributeOpKind {
@@ -115,7 +160,16 @@ impl AttributeOpKind {
         match self {
             Self::Set(a) => &a.name,
             Self::Unset { name } => name,
+            // The reverse row's name lives in its key, after the sentinel.
+            Self::Reverse { index, .. } => index
+                .strip_prefix(REVERSE_KEY_PREFIX)
+                .unwrap_or(index.as_str()),
         }
+    }
+
+    /// Whether this is a reverse-index row.
+    pub fn is_reverse(&self) -> bool {
+        matches!(self, Self::Reverse { .. })
     }
 }
 
@@ -123,9 +177,28 @@ impl AttributeOpKind {
 #[serde(deny_unknown_fields)]
 pub struct AttributeOp {
     pub op_seq: u64,
-    /// Index + partition dimension.
+    /// The resource path. Also the index + partition dimension for a **forward**
+    /// row; for a reverse row the key is in [`AttributeOpKind::Reverse::index`] and
+    /// this field is the *answer* the reverse query returns.
     pub path: String,
     pub op: AttributeOpKind,
+}
+
+impl AttributeOp {
+    /// A forward row's path must not intrude on the reverse key space.
+    ///
+    /// Returns an error rather than panicking, because the path comes from a
+    /// document's `metadata.path` — untrusted input, not a programming mistake.
+    pub fn assert_forward_path_is_not_a_reverse_key(path: &str) -> Result<(), String> {
+        if path.starts_with(REVERSE_KEY_PREFIX) {
+            return Err(format!(
+                "resource path {path:?} begins with the reverse-index sentinel; it \
+                 would collide with the reverse key space and silently answer \
+                 reverse queries"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,12 +211,34 @@ impl Dataset for AttributeDataset {
     fn sort_key(r: &AttributeOp) -> u64 {
         r.op_seq
     }
+
+    /// ⚠ Derived from [`Self::index_key`] rather than from `r.path`, so the
+    /// partition and the index key cannot disagree.
+    ///
+    /// They are two halves of one contract: a reader calls
+    /// `read_partition(index_value)` to pick the shard and then matches
+    /// `index_key(rec) == index_value` inside it. If a reverse row were partitioned
+    /// by its `path` but indexed by its reverse key, the reader would look in the
+    /// wrong shard and find **nothing** — a clean empty answer, with no error.
+    /// Writing both from one expression removes that possibility.
     fn partition(r: &AttributeOp, shard_count: u32) -> u32 {
-        shard_for_execution(&r.path, shard_count)
+        shard_for_execution(Self::index_key(r), shard_count)
     }
+
+    /// The forward key is the resource `path`; a reverse row carries its own key.
+    ///
+    /// ⚠ A forward path starting with [`REVERSE_KEY_PREFIX`] would land in the
+    /// reverse key space and answer reverse queries. It cannot happen — the prefix
+    /// is a control character — but "cannot happen" is how silent corruption gets
+    /// in, so [`AttributeOp::assert_forward_path_is_not_a_reverse_key`] is called on
+    /// every forward write.
     fn index_key(r: &AttributeOp) -> &str {
-        &r.path
+        match &r.op {
+            AttributeOpKind::Reverse { index, .. } => index.as_str(),
+            _ => &r.path,
+        }
     }
+
     fn read_partition(path: &str, shard_count: u32) -> u32 {
         shard_for_execution(path, shard_count)
     }
