@@ -26,6 +26,16 @@
 
 #![forbid(unsafe_code)]
 
+mod attribute;
+mod entity;
+mod relation;
+mod resource_type;
+
+pub use attribute::{Attribute, AttributeValue};
+pub use entity::{Entity, EntityRef};
+pub use relation::{Provenance, Relation, RelationKind};
+pub use resource_type::ResourceType;
+
 /// The crate's own version, surfaced so a running binary can report which
 /// catalog model it was built against.
 ///
