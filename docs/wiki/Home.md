@@ -83,6 +83,39 @@ reasoning in a doc comment at the definition.
 Append one `ResourceType` record. That is the whole procedure — **no DDL, no new
 dataset, no migration, no deploy.**
 
+#### ⭐ Demonstrated on a real second type, not only asserted
+
+`subscription` is supported, and it shares nothing structurally with a playbook:
+
+| | playbook | subscription |
+| :-- | :-- | :-- |
+| content | a `workflow:` tree of steps | a `spec:`, **no `workflow:` at all** |
+| reference location | `workflow[].tool[].path` | `spec.dispatch.playbook` |
+| credential dependency | — | `spec.auth` → `RelationKind::Requires` |
+| nesting | arbitrary (`iterator`, `task_sequence`) | flat |
+
+Measured on the `noetl/e2e` corpus: **9 of 9** `kind: Subscription` fixtures carry a
+`spec.dispatch.playbook`, 6 of 9 carry a `spec.auth`, and the spec scalars appear at
+`source` 9/9, `mode` 9/9, `activation` 7/9, `stream` 6/9, `consumer` 6/9. The playbooks
+they dispatch sit in the same directory, so the cross-type graph is closed and checkable.
+
+**Supporting it added zero datasets.** AC3's count is still exactly four.
+
+⚠ `spec.auth` names a **credential** — a resource type the catalog deliberately does
+*not* hold, because the CLI diverts credentials to `noetl.credential`. The edge is
+recorded anyway: *"this subscription needs alias X"* is a real dependency, and a dangling
+one is worth knowing about even when the target lives elsewhere.
+
+#### How a new type is added in practice
+
+1. Append a `ResourceType` record (`c4`).
+2. If its references live somewhere new in the document, add an arm to
+   `catalog_extract::find_references`, which dispatches on the document's own `kind`.
+
+⚠ An **unknown** kind yields an empty reference list rather than an error, deliberately:
+the catalog must be able to hold a resource type whose references nobody has taught it to
+read yet. Erroring there would make such a type unregisterable.
+
 ⚠ This is enforced, not merely intended.
 `tests/adding_a_resource_type_costs_no_schema.rs` exercises a type the crate has
 never heard of and asserts the `Dataset` impl count **does not change**. Today that
@@ -104,6 +137,9 @@ A guard whose purpose is unrecorded is a guard someone deletes as noise.
 | `absent_content_is_distinguishable_from_empty_content` | Conflating *not fetched* with *no body* — which would make a projected listing indistinguishable from a catalog of empty playbooks. |
 | `extracted_and_observed_stay_distinguishable_after_a_round_trip` | Collapsing provenance, i.e. treating a declared edge as an executed one. |
 | `only_json_is_unqueryable` | A new `AttributeValue` variant slipping in without a decision about filterability. A total match, so it fails to compile rather than silently shrinking. |
+| `a_subscription_is_not_read_as_a_playbook` | The dispatch arm firing for every kind. Asserts the dispatch **is** found *and* that the same document read as a playbook yields nothing — without the second half the first is incidental, since a subscription has no `workflow:` for the playbook walker to find. |
+| `a_subscription_without_an_auth_alias_yields_only_its_dispatch_edge` | The auth arm firing on something other than `spec.auth`. If both subscription fixtures yielded two edges, the auth edge would prove nothing. |
+| `a_playbook_and_a_subscription_coexist_without_contaminating_each_other` | A partition or index-key mistake making one type readable under the other's path. Both types share the same four logs, so this is the test that the sharing is correct rather than coincidental. |
 
 ### Two guards assert their own extraction first
 
