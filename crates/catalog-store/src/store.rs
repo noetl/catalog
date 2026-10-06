@@ -173,6 +173,45 @@ impl CatalogStore {
         self.types.append_record(op)
     }
 
+    /// Register a playbook from its source, recording the references it declares.
+    ///
+    /// This is the point of P3: registration today extracts the parent's own metadata
+    /// and **discards** the child paths its steps name, so a playbook can be
+    /// registered referencing a child that does not exist and nothing says so until
+    /// the step runs. Here the edges are recorded alongside the entity.
+    ///
+    /// Returns `(entity_op_seq, relations_recorded)`.
+    ///
+    /// # ⚠ The entity is registered even when extraction finds nothing
+    ///
+    /// And even when the source does not parse as a playbook. `noetl/server` accepts
+    /// documents this extractor cannot find references in — a `kind: Subscription`
+    /// entry has no `workflow:` at all — so refusing to register on an extraction
+    /// failure would make this store reject things the platform accepts. Extraction is
+    /// *additive information about* a registration, never a gate on it.
+    ///
+    /// The `Err` case is a storage failure, never an extraction failure.
+    pub fn register_from_source(
+        &mut self,
+        entity: Entity,
+        source: &str,
+        extracted_at: i64,
+    ) -> Result<(u64, usize)> {
+        let parent = entity.as_ref_pinned();
+        // Extract BEFORE the append, so a malformed source cannot leave a
+        // half-registered entity with no edges and no record of why.
+        let found = catalog_extract::find_references(source).unwrap_or_default();
+        let rels = catalog_extract::relations_from(&parent, &found, extracted_at);
+
+        let seq = self.register(entity)?;
+        let mut n = 0;
+        for r in rels {
+            self.assert_relation(r)?;
+            n += 1;
+        }
+        Ok((seq, n))
+    }
+
     // --- reads (folds) ------------------------------------------------------
 
     /// Every live version at `path`, newest version last.

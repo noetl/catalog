@@ -38,6 +38,7 @@ dependencies = [
 name = "catalog-store"
 version = "0.1.0"
 dependencies = [
+ "catalog-extract",
  "catalog-model",
  "ehdb-core",
  "ehdb-l0",

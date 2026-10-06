@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+catalog-extract = { workspace = true }
 catalog-model = { workspace = true }
 ehdb-l0 = { workspace = true }
 ehdb-core = { workspace = true }
@@ -16,6 +17,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+catalog-extract = { workspace = true }
 tempfile = "3"
 
 [lints]

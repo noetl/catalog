@@ -25,6 +25,7 @@ thiserror = "2"
 # server links, and its election/fencing self-describe as non-authoritative.
 ehdb-l0 = { git = "https://github.com/noetl/ehdb", tag = "v0.4.5" }
 ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.4.5" }
+catalog-extract = { path = "crates/catalog-extract" }
 catalog-model = { path = "crates/catalog-model" }
 
 # The playbook source is YAML. 0.9 is what noetl/server parses registration with, so
