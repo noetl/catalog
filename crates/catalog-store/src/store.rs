@@ -36,6 +36,16 @@ pub struct StoreConfig {
     /// this crate deliberately does not depend on. Multi-writer is out of scope and
     /// would need work EHDB has not finished.
     pub shard_count: u32,
+
+    /// Records per sealed part. `None` keeps EHDB's default of 1024.
+    ///
+    /// Exposed because it sets when a **merge** becomes eligible, and that interacts
+    /// with [`CatalogStore::tick`]: EHDB's `MergePolicy::d1` has `trigger_run_len: 4`
+    /// and only counts parts that are already durable, so a partition needs roughly
+    /// `4 × seal_max_records` ops before any merge is planned. At the default that is
+    /// ~**4,096**, which a test cannot reach quickly — and an untested merge driver is
+    /// one nobody can show works.
+    pub seal_max_records: Option<u64>,
 }
 
 impl StoreConfig {
@@ -43,11 +53,18 @@ impl StoreConfig {
         Self {
             root: root.into(),
             shard_count: 1,
+            seal_max_records: None,
         }
     }
 
+    /// Override the records-per-part threshold. See [`StoreConfig::seal_max_records`].
+    pub fn with_seal_max_records(mut self, n: u64) -> Self {
+        self.seal_max_records = Some(n);
+        self
+    }
+
     fn l0(&self, dataset: &str) -> L0Config {
-        L0Config::for_dataset(dataset, self.root.join(dataset))
+        let cfg = L0Config::for_dataset(dataset, self.root.join(dataset))
             .with_shard_count(self.shard_count)
             // ⚠ Set explicitly. See SEAL_MAX_AGE — and note this flag is
             // NECESSARY BUT NOT SUFFICIENT: an idle shard takes no appends, so
@@ -59,10 +76,14 @@ impl StoreConfig {
             // `L0Engine` caller does not). Catalog writes are rare and each one
             // matters, so the fsync cost is irrelevant and the failure mode of being
             // wrong is losing a registration.
-            .with_flush(FlushPolicy::EveryAppend)
+            .with_flush(FlushPolicy::EveryAppend);
         // `manifest_retain` is deliberately left at its default of 32. `0` means
         // unbounded, which on prod produced 6,770 snapshots and 19.4 GB behind
         // 71.8 MB of data and stopped every append.
+        match self.seal_max_records {
+            Some(n) => cfg.with_seal_max_records(n),
+            None => cfg,
+        }
     }
 }
 
@@ -82,12 +103,38 @@ pub struct Registered {
     pub attributes: usize,
 }
 
+/// What one [`CatalogStore::tick`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ticked {
+    /// Parts sealed because they exceeded [`SEAL_MAX_AGE`].
+    pub sealed: usize,
+    /// Merges performed. Zero is the normal reading until a partition has roughly
+    /// `4 × seal_max_records` ops; see [`CatalogStore::tick`].
+    pub merged: usize,
+}
+
+/// Sealed-part counts per dataset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartCounts {
+    pub entities: usize,
+    pub attributes: usize,
+    pub relations: usize,
+    pub types: usize,
+}
+
+impl PartCounts {
+    pub fn total(&self) -> usize {
+        self.entities + self.attributes + self.relations + self.types
+    }
+}
+
 /// The catalog's four logs and the folds over them.
 pub struct CatalogStore {
     entities: L0Engine<EntityDataset>,
     attributes: L0Engine<AttributeDataset>,
     relations: L0Engine<RelationDataset>,
     types: L0Engine<TypeDataset>,
+    shard_count: u32,
 }
 
 type Result<T> = std::result::Result<T, ehdb_core::EhdbError>;
@@ -108,6 +155,7 @@ impl CatalogStore {
             )?,
             relations: L0Engine::open(cfg.l0(RelationDataset::NAME), sub(RelationDataset::NAME)?)?,
             types: L0Engine::open(cfg.l0(TypeDataset::NAME), sub(TypeDataset::NAME)?)?,
+            shard_count: cfg.shard_count,
         })
     }
 
@@ -340,13 +388,50 @@ impl CatalogStore {
     /// substrate. Setting the config field and never calling this is the
     /// configured-but-unreachable shape that `representation-drift.md` is about.
     ///
-    /// Returns the number of parts sealed across all four datasets.
-    pub fn tick(&mut self) -> Result<usize> {
-        let mut n = 0;
-        n += self.entities.seal_aged_parts()?;
-        n += self.attributes.seal_aged_parts()?;
-        n += self.relations.seal_aged_parts()?;
-        n += self.types.seal_aged_parts()?;
-        Ok(n)
+    /// Also drives **merges**, which nothing else does either.
+    ///
+    /// ⚠ `run_pending_merges` is caller-owned exactly like `seal_aged_parts`: the only
+    /// thing EHDB runs on its own is the background uploader. Measured here before
+    /// adding it — 3,500 records produced 3 parts and `run_pending_merges()` performed
+    /// **0**, because `MergePolicy::d1` needs a run of **4** consecutive *durable*
+    /// small parts. So at the default `seal_max_records` of 1024 a partition needs
+    /// ~**4,096** ops before a merge is even planned.
+    ///
+    /// That is why this was harmless and still worth fixing: the catalog's ~1,600
+    /// entries will not reach it on the entity log, but the **attribute** log will —
+    /// 1,600 resources carrying several labels each is thousands of ops in one
+    /// partition. Past that point parts accumulate monotonically with nothing merging
+    /// them, which is the shape that filled a prod PVC while the writer reported
+    /// `Ready`.
+    pub fn tick(&mut self) -> Result<Ticked> {
+        let mut sealed = 0;
+        sealed += self.entities.seal_aged_parts()?;
+        sealed += self.attributes.seal_aged_parts()?;
+        sealed += self.relations.seal_aged_parts()?;
+        sealed += self.types.seal_aged_parts()?;
+
+        let mut merged = 0;
+        merged += self.entities.run_pending_merges()?;
+        merged += self.attributes.run_pending_merges()?;
+        merged += self.relations.run_pending_merges()?;
+        merged += self.types.run_pending_merges()?;
+
+        Ok(Ticked { sealed, merged })
+    }
+
+    /// Sealed parts per partition on each dataset, for observability and tests.
+    ///
+    /// Reported per dataset rather than summed: a total cannot say *which* log is
+    /// accumulating, and the attribute log is the one expected to grow fastest.
+    pub fn part_counts(&self) -> PartCounts {
+        let n = self.shard_count;
+        let count =
+            |m: ehdb_l0::Manifest| -> usize { (0..n).map(|p| m.parts_in_partition(p).len()).sum() };
+        PartCounts {
+            entities: count(self.entities.manifest_snapshot()),
+            attributes: count(self.attributes.manifest_snapshot()),
+            relations: count(self.relations.manifest_snapshot()),
+            types: count(self.types.manifest_snapshot()),
+        }
     }
 }

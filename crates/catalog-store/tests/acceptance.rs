@@ -237,11 +237,16 @@ fn ac7_the_sealer_is_driven_and_not_merely_configured() {
     // `tick` must exist, be callable, and report a count. A zero here is correct —
     // the part is younger than SEAL_MAX_AGE — but the call itself must not be absent,
     // because that absence is the defect.
-    let sealed = s.tick().expect("tick must be callable");
+    let t = s.tick().expect("tick must be callable");
     assert_eq!(
-        sealed, 0,
-        "a part younger than SEAL_MAX_AGE must not seal yet; got {sealed}"
+        t.sealed, 0,
+        "a part younger than SEAL_MAX_AGE must not seal yet; got {}",
+        t.sealed
     );
+    // ⚠ `merged: 0` is also correct here and must not read as a broken driver:
+    // `MergePolicy::d1`'s trigger_run_len is 4, and one part cannot merge. The two
+    // counts are reported separately for exactly this reason.
+    assert_eq!(t.merged, 0, "one part cannot merge; got {}", t.merged);
 
     // And the read must still work after a tick, i.e. ticking does not lose the tail.
     assert_eq!(
