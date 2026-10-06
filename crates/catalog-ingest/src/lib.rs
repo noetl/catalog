@@ -270,6 +270,22 @@ pub fn ingest(
             .and_then(|v| v.as_u64())
             .unwrap_or(1) as u32;
 
+        // ⚠ Declare the resource type on first use, so the two views of one state
+        // agree. Before this, ingesting 53 playbooks left `resource_type("playbook")`
+        // returning None while `resources_of_type("playbook")` returned all 53 — the
+        // CLI printed "type playbook is not declared in this store" directly above a
+        // successful listing of 53 of them. A catalogue that contradicts itself about
+        // whether a type exists is worse than one that is merely incomplete.
+        //
+        // `executable` follows `ResourceType`'s own documented split: playbook and
+        // subscription are executable. Idempotent — declaring is an append whose fold
+        // is latest-op-wins, and re-declaring the same shape is a no-op in effect.
+        if !result.by_kind.contains_key(&type_name) {
+            store
+                .declare_type(catalog_model::ResourceType::new(&type_name, true, true))
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+
         let entity = Entity {
             resource_type: type_name.clone(),
             path,
