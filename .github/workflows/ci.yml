@@ -1,0 +1,67 @@
+name: CI
+
+# A real gate from commit one.
+#
+# `noetl/ai-meta` ran with ZERO CI for its whole life, and five NoETL repos ran
+# `cargo clippy ... || true`, which cannot fail and therefore gates nothing.
+# Both are recorded in noetl/ai-meta#374. This file is written so that neither
+# shape is possible here: every step either passes or fails the job, and none of
+# them is suffixed with `|| true`.
+#
+# Shape copied from noetl/ehdb's ci.yml, which is the one repo in the fleet whose
+# clippy step is a genuine `-D warnings` gate.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# A second push to the same PR should cancel the first; a stale green on an old
+# commit is one of the ways "CI is green" has been misread in this fleet.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `toolchain:` argument: rust-toolchain.toml pins 1.99.0 and rustup
+      # honours it. Naming a version here as well would create two authorities
+      # that can disagree — the same class of bug as the 2026-08-03 version
+      # regression in noetl/server.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+          components: rustfmt, clippy
+
+      - name: Report the toolchain actually in use
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # Runs before the full suite because it is the check a developer's machine
+      # structurally cannot make (an untracked source file is present locally).
+      # Named separately so the failure is legible instead of surfacing as an
+      # unrelated compile error inside a long test run.
+      - name: Source hygiene (every .rs on disk is git-tracked)
+        run: cargo test -p catalog-model --test workspace_target_hygiene -- --nocapture
+
+      - name: Tests
+        run: cargo test --workspace --all-targets
+
+      # `--all-targets` so tests and benches are linted too. `-D warnings` with
+      # NO `|| true`: this step is allowed to fail the build, which is the whole
+      # point of having it.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

@@ -1,0 +1,7 @@
+# Pinned to match every other NoETL Rust repo (ehdb, server, worker, cli,
+# tools, gateway, signal-mesh all pin 1.99.0 on main). A floating `stable`
+# here would make a clippy lint that fires on a newer compiler look like a
+# defect in this repo.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]

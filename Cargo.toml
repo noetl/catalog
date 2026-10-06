@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/catalog-model"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/noetl/catalog"
+rust-version = "1.99.0"
+
+[workspace.dependencies]
+# Kept deliberately small on commit one. The EHDB persistence dependency is
+# added in the commit that introduces the store boundary, not before — an
+# unused dependency in a workspace is a claim the code does not yet support.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# These are denied in CI via `-D warnings`; declaring them here means a local
+# `cargo clippy` reproduces CI rather than disagreeing with it.
+all = { level = "warn", priority = -1 }
