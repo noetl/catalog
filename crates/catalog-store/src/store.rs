@@ -88,7 +88,6 @@ pub struct CatalogStore {
     attributes: L0Engine<AttributeDataset>,
     relations: L0Engine<RelationDataset>,
     types: L0Engine<TypeDataset>,
-    next_seq: u64,
 }
 
 type Result<T> = std::result::Result<T, ehdb_core::EhdbError>;
@@ -109,84 +108,91 @@ impl CatalogStore {
             )?,
             relations: L0Engine::open(cfg.l0(RelationDataset::NAME), sub(RelationDataset::NAME)?)?,
             types: L0Engine::open(cfg.l0(TypeDataset::NAME), sub(TypeDataset::NAME)?)?,
-            next_seq: 1,
         })
-    }
-
-    fn seq(&mut self) -> u64 {
-        let s = self.next_seq;
-        self.next_seq += 1;
-        s
     }
 
     // --- writes -------------------------------------------------------------
 
     pub fn register(&mut self, entity: Entity) -> Result<u64> {
         let op = EntityOp {
-            op_seq: self.seq(),
+            // Assigned by the engine in `append_writer_assigned`; see
+            // `Dataset::assign_sort_key`. A placeholder here, never the real key.
+            op_seq: 0,
             path: entity.path.clone(),
             version: entity.version,
             op: EntityOpKind::Registered(Box::new(entity)),
         };
-        self.entities.append_record(op)
+        self.entities.append_writer_assigned(op)
     }
 
     pub fn archive(&mut self, path: &str, version: u32, at: i64) -> Result<u64> {
         let op = EntityOp {
-            op_seq: self.seq(),
+            // Assigned by the engine in `append_writer_assigned`; see
+            // `Dataset::assign_sort_key`. A placeholder here, never the real key.
+            op_seq: 0,
             path: path.to_string(),
             version,
             op: EntityOpKind::Archived { at },
         };
-        self.entities.append_record(op)
+        self.entities.append_writer_assigned(op)
     }
 
     pub fn restore(&mut self, path: &str, version: u32) -> Result<u64> {
         let op = EntityOp {
-            op_seq: self.seq(),
+            // Assigned by the engine in `append_writer_assigned`; see
+            // `Dataset::assign_sort_key`. A placeholder here, never the real key.
+            op_seq: 0,
             path: path.to_string(),
             version,
             op: EntityOpKind::Restored,
         };
-        self.entities.append_record(op)
+        self.entities.append_writer_assigned(op)
     }
 
     pub fn set_attribute(&mut self, path: &str, attr: Attribute) -> Result<u64> {
         let op = AttributeOp {
-            op_seq: self.seq(),
+            // Assigned by the engine in `append_writer_assigned`; see
+            // `Dataset::assign_sort_key`. A placeholder here, never the real key.
+            op_seq: 0,
             path: path.to_string(),
             op: AttributeOpKind::Set(Box::new(attr)),
         };
-        self.attributes.append_record(op)
+        self.attributes.append_writer_assigned(op)
     }
 
     pub fn unset_attribute(&mut self, path: &str, name: &str) -> Result<u64> {
         let op = AttributeOp {
-            op_seq: self.seq(),
+            // Assigned by the engine in `append_writer_assigned`; see
+            // `Dataset::assign_sort_key`. A placeholder here, never the real key.
+            op_seq: 0,
             path: path.to_string(),
             op: AttributeOpKind::Unset {
                 name: name.to_string(),
             },
         };
-        self.attributes.append_record(op)
+        self.attributes.append_writer_assigned(op)
     }
 
     pub fn assert_relation(&mut self, rel: Relation) -> Result<u64> {
         let op = RelationOp {
-            op_seq: self.seq(),
+            // Assigned by the engine in `append_writer_assigned`; see
+            // `Dataset::assign_sort_key`. A placeholder here, never the real key.
+            op_seq: 0,
             from_path: rel.from_entity.path.clone(),
             op: RelationOpKind::Asserted(Box::new(rel)),
         };
-        self.relations.append_record(op)
+        self.relations.append_writer_assigned(op)
     }
 
     pub fn declare_type(&mut self, t: ResourceType) -> Result<u64> {
         let op = TypeOp {
-            op_seq: self.seq(),
+            // Assigned by the engine in `append_writer_assigned`; see
+            // `Dataset::assign_sort_key`. A placeholder here, never the real key.
+            op_seq: 0,
             name: t.name.clone(),
             declared: t,
         };
-        self.types.append_record(op)
+        self.types.append_writer_assigned(op)
     }
 
     /// Register a playbook from its source, recording the references it declares.

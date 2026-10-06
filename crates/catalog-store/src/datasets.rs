@@ -79,6 +79,23 @@ impl Dataset for EntityDataset {
     fn read_partition(path: &str, shard_count: u32) -> u32 {
         shard_for_execution(path, shard_count)
     }
+
+    /// ⚠ The ENGINE assigns the ordering key, not this crate.
+    ///
+    /// `ehdb-l0`'s `Dataset` contract requires records appended in **ascending
+    /// `sort_key` order within a partition** — the sparse index, MinMax pruning and
+    /// merge all rely on it. A hand-rolled counter cannot satisfy that across a
+    /// process restart: it would begin again from its initial value and append
+    /// *below* the existing maximum, which the engine accepts without erroring.
+    ///
+    /// The engine's `global_sequence` is recovered from the manifest on `open`
+    /// (`manifest.max_sequence()`), so it is monotonic across reopens by
+    /// construction. That is why every write here goes through
+    /// `append_writer_assigned` rather than `append_record`.
+    fn assign_sort_key(mut record: EntityOp, writer_seq: u64) -> EntityOp {
+        record.op_seq = writer_seq;
+        record
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +146,23 @@ impl Dataset for AttributeDataset {
     }
     fn read_partition(path: &str, shard_count: u32) -> u32 {
         shard_for_execution(path, shard_count)
+    }
+
+    /// ⚠ The ENGINE assigns the ordering key, not this crate.
+    ///
+    /// `ehdb-l0`'s `Dataset` contract requires records appended in **ascending
+    /// `sort_key` order within a partition** — the sparse index, MinMax pruning and
+    /// merge all rely on it. A hand-rolled counter cannot satisfy that across a
+    /// process restart: it would begin again from its initial value and append
+    /// *below* the existing maximum, which the engine accepts without erroring.
+    ///
+    /// The engine's `global_sequence` is recovered from the manifest on `open`
+    /// (`manifest.max_sequence()`), so it is monotonic across reopens by
+    /// construction. That is why every write here goes through
+    /// `append_writer_assigned` rather than `append_record`.
+    fn assign_sort_key(mut record: AttributeOp, writer_seq: u64) -> AttributeOp {
+        record.op_seq = writer_seq;
+        record
     }
 }
 
@@ -189,6 +223,23 @@ impl Dataset for RelationDataset {
     fn read_partition(from_path: &str, shard_count: u32) -> u32 {
         shard_for_execution(from_path, shard_count)
     }
+
+    /// ⚠ The ENGINE assigns the ordering key, not this crate.
+    ///
+    /// `ehdb-l0`'s `Dataset` contract requires records appended in **ascending
+    /// `sort_key` order within a partition** — the sparse index, MinMax pruning and
+    /// merge all rely on it. A hand-rolled counter cannot satisfy that across a
+    /// process restart: it would begin again from its initial value and append
+    /// *below* the existing maximum, which the engine accepts without erroring.
+    ///
+    /// The engine's `global_sequence` is recovered from the manifest on `open`
+    /// (`manifest.max_sequence()`), so it is monotonic across reopens by
+    /// construction. That is why every write here goes through
+    /// `append_writer_assigned` rather than `append_record`.
+    fn assign_sort_key(mut record: RelationOp, writer_seq: u64) -> RelationOp {
+        record.op_seq = writer_seq;
+        record
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +273,23 @@ impl Dataset for TypeDataset {
     }
     fn read_partition(name: &str, shard_count: u32) -> u32 {
         shard_for_execution(name, shard_count)
+    }
+
+    /// ⚠ The ENGINE assigns the ordering key, not this crate.
+    ///
+    /// `ehdb-l0`'s `Dataset` contract requires records appended in **ascending
+    /// `sort_key` order within a partition** — the sparse index, MinMax pruning and
+    /// merge all rely on it. A hand-rolled counter cannot satisfy that across a
+    /// process restart: it would begin again from its initial value and append
+    /// *below* the existing maximum, which the engine accepts without erroring.
+    ///
+    /// The engine's `global_sequence` is recovered from the manifest on `open`
+    /// (`manifest.max_sequence()`), so it is monotonic across reopens by
+    /// construction. That is why every write here goes through
+    /// `append_writer_assigned` rather than `append_record`.
+    fn assign_sort_key(mut record: TypeOp, writer_seq: u64) -> TypeOp {
+        record.op_seq = writer_seq;
+        record
     }
 }
 
