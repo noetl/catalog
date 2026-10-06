@@ -169,6 +169,10 @@ impl CatalogStore {
     // --- writes -------------------------------------------------------------
 
     pub fn register(&mut self, entity: Entity) -> Result<u64> {
+        EntityOp::assert_forward_path_is_not_a_synthetic_key(&entity.path)
+            .map_err(ehdb_core::EhdbError::InvalidIdentifier)?;
+        let type_name = entity.resource_type.clone();
+        let path_for_index = entity.path.clone();
         let op = EntityOp {
             // Assigned by the engine in `append_writer_assigned`; see
             // `Dataset::assign_sort_key`. A placeholder here, never the real key.
@@ -177,7 +181,60 @@ impl CatalogStore {
             version: entity.version,
             op: EntityOpKind::Registered(Box::new(entity)),
         };
+        // Forward first, for the same reason as the c3 reverse row: a crash between
+        // the two leaves the forward answer complete and the listing short by one.
+        let forward_seq = self.entities.append_writer_assigned(op)?;
+        self.write_type_index(&path_for_index, &type_name, true)?;
+        Ok(forward_seq)
+    }
+
+    /// Append one type-index row. Shared by register/archive/restore so the three
+    /// cannot drift in how they build the key.
+    fn write_type_index(&mut self, path: &str, resource_type: &str, live: bool) -> Result<u64> {
+        let op = EntityOp {
+            op_seq: 0,
+            path: path.to_string(),
+            // ⚠ Zero, never a real version. A type-index row is about the PATH, not
+            // about one version of it: a listing must not show a path twice because
+            // it has three versions. The forward folds filter these rows out, so the
+            // 0 can never become a phantom version.
+            version: 0,
+            op: EntityOpKind::TypeIndex {
+                index: crate::datasets::type_key(resource_type),
+                path: path.to_string(),
+                live,
+            },
+        };
         self.entities.append_writer_assigned(op)
+    }
+
+    /// **List every live resource of one type.**
+    ///
+    /// The query that would otherwise force a fifth dataset, and the one that makes
+    /// AC3's claim — "adding a resource type costs no schema" — checkable rather than
+    /// asserted. Before this, `catalog list` printed that it could not do it.
+    ///
+    /// ⚠ Folded per PATH, not with `.last()`. Many paths share one type key (~1,600
+    /// under `playbook` at expected size), so `.last()` would return one of them,
+    /// successfully. The sibling c3 index measured exactly that: 1 of 49.
+    pub fn resources_of_type(&self, resource_type: &str) -> Result<Vec<String>> {
+        let key = crate::datasets::type_key(resource_type);
+        let ops = self.entities.read_index_after(&key, 0)?;
+        let folded = fold_latest_by(ops, |o| match &o.op {
+            EntityOpKind::TypeIndex { path, .. } => path.clone(),
+            _ => o.path.clone(),
+        });
+        let mut out: Vec<String> = folded
+            .into_values()
+            .filter_map(|op| match op.op {
+                EntityOpKind::TypeIndex {
+                    path, live: true, ..
+                } => Some(path),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        Ok(out)
     }
 
     pub fn archive(&mut self, path: &str, version: u32, at: i64) -> Result<u64> {
@@ -189,7 +246,9 @@ impl CatalogStore {
             version,
             op: EntityOpKind::Archived { at },
         };
-        self.entities.append_writer_assigned(op)
+        let forward_seq = self.entities.append_writer_assigned(op)?;
+        self.refresh_type_index(path)?;
+        Ok(forward_seq)
     }
 
     pub fn restore(&mut self, path: &str, version: u32) -> Result<u64> {
@@ -201,7 +260,50 @@ impl CatalogStore {
             version,
             op: EntityOpKind::Restored,
         };
-        self.entities.append_writer_assigned(op)
+        let forward_seq = self.entities.append_writer_assigned(op)?;
+        self.refresh_type_index(path)?;
+        Ok(forward_seq)
+    }
+
+    /// Recompute a path's presence in the type listing after an archive or restore.
+    ///
+    /// ⚠⚠ **Archiving a version is not archiving the path.** A path carries many
+    /// versions; archiving v1 while v2 and v3 are live must leave the path in the
+    /// listing. So the tombstone is derived from `latest(path)` — "is any version
+    /// still live" — rather than from the op that just happened. Writing
+    /// `live: false` on every archive would silently drop paths that are still
+    /// perfectly serveable, and the listing would under-report.
+    ///
+    /// The type name comes from `latest()` when a live version exists, and otherwise
+    /// from the newest *registered* version, because a tombstone still has to be
+    /// filed under the right key to shadow the live row it supersedes. If no
+    /// registration exists at all there is nothing to index and this is a no-op.
+    fn refresh_type_index(&mut self, path: &str) -> Result<()> {
+        let is_live = self.latest(path)?.is_some();
+
+        // ⚠ The type name must come from the raw ops, NOT from `versions()`.
+        //
+        // This is where the first draft was wrong, and the archive test caught it.
+        // `versions()` folds latest-op-per-version and emits only `Registered`, so
+        // once every version is archived it returns an EMPTY vec — the fallback found
+        // no type name, returned early, and wrote **no tombstone at all**. The path
+        // stayed listed forever, which is precisely the under-reporting this function
+        // exists to prevent, arriving by the opposite route.
+        //
+        // So: scan for the most recent `Registered` op regardless of what later
+        // archive/restore ops say about it. A path that was never registered has no
+        // type and nothing to index.
+        let ops = self.entities.read_index_after(path, 0)?;
+        let type_name = ops.iter().rev().find_map(|o| match &o.op {
+            EntityOpKind::Registered(e) => Some(e.resource_type.clone()),
+            _ => None,
+        });
+        let Some(type_name) = type_name else {
+            return Ok(());
+        };
+
+        self.write_type_index(path, &type_name, is_live)?;
+        Ok(())
     }
 
     /// Set an attribute, writing the forward row **and** its reverse-index row.
@@ -357,6 +459,10 @@ impl CatalogStore {
     /// the index key does not identify the folded entity — see [`fold_latest_by`].
     pub fn versions(&self, path: &str) -> Result<Vec<Entity>> {
         let ops = self.entities.read_index_after(path, 0)?;
+        // Type-index rows excluded from the fold INPUT; see the same note on
+        // `attributes`. They carry `version: 0`, so admitting them would create a
+        // phantom version 0 alongside the real ones.
+        let ops: Vec<_> = ops.into_iter().filter(|o| !o.op.is_type_index()).collect();
         let folded = fold_latest_by(ops, |o| o.version);
         let mut out = Vec::new();
         for op in folded.into_values() {
@@ -366,6 +472,8 @@ impl CatalogStore {
                 // reconstructed into an Entity, and inventing one would fabricate a
                 // record. Skipped, deliberately.
                 EntityOpKind::Archived { .. } | EntityOpKind::Restored => {}
+                // Unreachable: filtered above.
+                EntityOpKind::TypeIndex { .. } => {}
             }
         }
         Ok(out)
@@ -374,6 +482,7 @@ impl CatalogStore {
     /// The newest non-archived version at `path`.
     pub fn latest(&self, path: &str) -> Result<Option<Entity>> {
         let ops = self.entities.read_index_after(path, 0)?;
+        let ops: Vec<_> = ops.into_iter().filter(|o| !o.op.is_type_index()).collect();
         // Replay per version so archive/restore apply to the version they name.
         let mut per_version: BTreeMap<u32, (Option<Entity>, Option<i64>)> = BTreeMap::new();
         for op in ops {
@@ -382,6 +491,8 @@ impl CatalogStore {
                 EntityOpKind::Registered(e) => slot.0 = Some(*e),
                 EntityOpKind::Archived { at } => slot.1 = Some(at),
                 EntityOpKind::Restored => slot.1 = None,
+                // Unreachable: filtered above.
+                EntityOpKind::TypeIndex { .. } => {}
             }
         }
         Ok(per_version

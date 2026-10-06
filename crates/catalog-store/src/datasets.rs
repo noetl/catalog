@@ -45,6 +45,34 @@ pub enum EntityOpKind {
         at: i64,
     },
     Restored,
+    /// A **type-index** row: "a resource of the type named by `index` lives at
+    /// `path`".
+    ///
+    /// Written alongside every register/archive/restore, so `list --type playbook`
+    /// is one indexed read. Before this, listing was impossible: the CLI's `list`
+    /// printed "a full path listing needs an index this store does not yet keep".
+    ///
+    /// ⚠ This is what makes the generalized model's central claim checkable. AC3
+    /// says adding a resource type must not add a dataset; "list every resource of
+    /// type X" is the query that would otherwise force one.
+    ///
+    /// ⚠⚠ Many paths share one type key — at the catalog's expected size, ~1,600
+    /// under `playbook` alone. Same `.last()` hazard as the c3 reverse index, where
+    /// it measured 1 of 49.
+    TypeIndex {
+        index: String,
+        path: String,
+        /// `false` is a tombstone, written on archive so an archived resource leaves
+        /// the listing. Without it the listing would only grow.
+        live: bool,
+    },
+}
+
+impl EntityOpKind {
+    /// Whether this is a type-index row.
+    pub fn is_type_index(&self) -> bool {
+        matches!(self, Self::TypeIndex { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,12 +98,22 @@ impl Dataset for EntityDataset {
     fn sort_key(r: &EntityOp) -> u64 {
         r.op_seq
     }
+
+    /// Derived from [`Self::index_key`], never from `r.path` — see the same note on
+    /// [`AttributeDataset::partition`]. A row partitioned by one value and indexed by
+    /// another sends the reader to the wrong shard, which returns **nothing** rather
+    /// than erroring.
     fn partition(r: &EntityOp, shard_count: u32) -> u32 {
-        shard_for_execution(&r.path, shard_count)
+        shard_for_execution(Self::index_key(r), shard_count)
     }
+
     fn index_key(r: &EntityOp) -> &str {
-        &r.path
+        match &r.op {
+            EntityOpKind::TypeIndex { index, .. } => index.as_str(),
+            _ => &r.path,
+        }
     }
+
     fn read_partition(path: &str, shard_count: u32) -> u32 {
         shard_for_execution(path, shard_count)
     }
@@ -113,6 +151,22 @@ impl Dataset for EntityDataset {
 /// [`AttributeDataset::index_key`] asserts a forward path never starts with it, so
 /// the two key spaces are disjoint by construction rather than by convention.
 pub const REVERSE_KEY_PREFIX: &str = "\u{1}attr/";
+
+/// The prefix marking a `c1` row as a **type-index** row rather than a forward one.
+///
+/// Same device as [`REVERSE_KEY_PREFIX`], a separate key space in the same dataset,
+/// and for the same reason: `list every resource of type X` cannot be answered from
+/// an index keyed by `path`. A distinct sentinel (`type/` vs `attr/`) keeps the two
+/// reverse spaces apart even though they live in different datasets — one grep for
+/// `\u{1}` finds every synthetic key in the crate.
+pub const TYPE_KEY_PREFIX: &str = "\u{1}type/";
+
+/// The type-index key for a resource-type name. Lowercased, because
+/// `resource_type()` folds on the lowercased name and noetl/server#429 was a real
+/// prod bug caused by two spellings of one kind.
+pub fn type_key(resource_type: &str) -> String {
+    format!("{TYPE_KEY_PREFIX}{}", resource_type.to_lowercase())
+}
 
 /// The reverse index key for an attribute name.
 pub fn reverse_key(attribute_name: &str) -> String {
@@ -182,6 +236,27 @@ pub struct AttributeOp {
     /// this field is the *answer* the reverse query returns.
     pub path: String,
     pub op: AttributeOpKind,
+}
+
+impl EntityOp {
+    /// A forward row's path must not intrude on either synthetic key space.
+    ///
+    /// Checks BOTH sentinels, not just this dataset's: a single `\u{1}` prefix test
+    /// would be laxer, and naming both makes the error say which space was hit.
+    pub fn assert_forward_path_is_not_a_synthetic_key(path: &str) -> Result<(), String> {
+        for (prefix, what) in [
+            (TYPE_KEY_PREFIX, "type-index"),
+            (REVERSE_KEY_PREFIX, "reverse-index"),
+        ] {
+            if path.starts_with(prefix) {
+                return Err(format!(
+                    "resource path {path:?} begins with the {what} sentinel; it would \
+                     collide with a synthetic key space and silently answer index queries"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl AttributeOp {

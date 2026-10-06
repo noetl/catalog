@@ -199,10 +199,25 @@ fn run(args: &[String]) -> Result<(), String> {
                     None => println!("type {t} is not declared in this store"),
                 }
             }
-            println!(
-                "⚠ a full path listing needs an index this store does not yet keep; \
-                 `show --path` reads one path. See noetl/ai-meta#427."
-            );
+            // The listing, now that c1 carries a type index.
+            match want {
+                Some(t) => {
+                    let paths = store
+                        .resources_of_type(t)
+                        .map_err(|e| format!("resources_of_type: {e}"))?;
+                    println!("{t}: {} live resource(s)", paths.len());
+                    for p in &paths {
+                        println!("  {p}");
+                    }
+                    if paths.is_empty() {
+                        println!(
+                            "⚠ nothing live of type {t}. An empty listing and an \
+                             un-ingested store look identical — check --store."
+                        );
+                    }
+                }
+                None => println!("--type <NAME> selects what to list (e.g. playbook)"),
+            }
             Ok(())
         }
         // The reverse lookup. The query this catalog exists for: rotating a keychain
