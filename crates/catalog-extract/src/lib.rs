@@ -183,6 +183,11 @@ pub fn find_attributes(source: &str, entity_id: i64) -> Result<Vec<Attribute>, s
         .and_then(|v| v.as_str())
         .map(|s| s.to_lowercase())
         .unwrap_or_default();
+
+    if kind == "playbook" {
+        collect_playbook_facts(&doc, entity_id, &mut out);
+    }
+
     if kind == "subscription" {
         if let Some(spec) = doc.get(serde_yaml::Value::from("spec")) {
             for key in SUBSCRIPTION_SPEC_SCALARS {
@@ -359,6 +364,99 @@ fn collect_tool(tool: &serde_yaml::Value, step: Option<&str>, out: &mut Vec<Foun
         target_type: "playbook".into(),
         path: path.to_string(),
     });
+}
+
+/// The two facts every real playbook carries that are worth a catalog query.
+///
+/// # Why these two
+///
+/// Measured against the 53 `adiona/playbooks/*.yaml` on `noetl/travel@origin/main` — the
+/// first real population this extractor was ever run over:
+///
+/// ```text
+/// denominator 53 | carries auth: 53 | carries a tool kind: 53
+/// tool kinds : 53x postgres
+/// auth aliases: 49x adiona_actor, 4x adiona_migrator
+/// ```
+///
+/// Before this, ingesting all 53 produced `relations=0 attributes=0`. The relations zero
+/// is **correct** — they are leaf playbooks that call no child, which a measurement
+/// confirmed after a first regex wrongly counted each document's own `metadata.path` as a
+/// child reference. The attributes zero was a gap: `find_attributes` handled
+/// `metadata.labels` (none of the 53 have any) and subscription `spec.*`, so a playbook
+/// yielded nothing at all.
+///
+/// Both facts answer questions a catalog exists to answer:
+///
+/// * `uses_tool.<kind>` — which resources touch Postgres / HTTP / an LLM.
+/// * `uses_credential.<alias>` — which resources need a given keychain alias. This is the
+///   one with teeth: rotating `adiona_actor` means knowing the 49 playbooks that break.
+///
+/// # ⚠ The alias only, never a value
+///
+/// `execution-model.md` is explicit that a playbook references a credential **by alias**
+/// and the keychain resolves it at step execution time. So an `auth:` that is a plain
+/// string is a reference and safe to catalogue, while an `auth:` that is a **mapping** is
+/// an inline credential — and copying that into the catalog would duplicate a secret into
+/// a second store. Non-scalar `auth:` is therefore skipped, and
+/// `an_inline_credential_mapping_is_never_extracted` guards it.
+///
+/// Values are `true` rather than the alias name because the fact is membership: the
+/// attribute *name* carries which tool or alias, so a fold keyed by name answers "every
+/// resource using X" without scanning values.
+fn collect_playbook_facts(doc: &serde_yaml::Value, entity_id: i64, out: &mut Vec<Attribute>) {
+    let steps = match doc
+        .get(serde_yaml::Value::from("workflow"))
+        .and_then(|w| w.as_sequence())
+    {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Sets, because a playbook naming the same tool in nine steps is one fact about the
+    // playbook, not nine. Sorted output keeps the attribute order stable across runs —
+    // an unstable order would make every re-ingest look like a change.
+    let mut tools: std::collections::BTreeSet<String> = Default::default();
+    let mut creds: std::collections::BTreeSet<String> = Default::default();
+
+    for step in steps {
+        let Some(tool) = step.get(serde_yaml::Value::from("tool")) else {
+            continue;
+        };
+        if let Some(k) = tool
+            .get(serde_yaml::Value::from("kind"))
+            .and_then(|v| v.as_str())
+        {
+            tools.insert(k.to_lowercase());
+        }
+        if let Some(auth) = tool.get(serde_yaml::Value::from("auth")) {
+            // ⚠ Scalar strings only. See the safety note above.
+            if let Some(alias) = auth.as_str() {
+                let alias = alias.trim();
+                // A templated alias (`{{ db_credential }}`) names a binding, not a
+                // credential, so cataloguing it would assert a dependency on something
+                // that does not exist under that name.
+                if !alias.is_empty() && !alias.contains("{{") {
+                    creds.insert(alias.to_string());
+                }
+            }
+        }
+    }
+
+    for t in tools {
+        out.push(Attribute::new(
+            entity_id,
+            format!("uses_tool.{t}"),
+            AttributeValue::Flag(true),
+        ));
+    }
+    for c in creds {
+        out.push(Attribute::new(
+            entity_id,
+            format!("uses_credential.{c}"),
+            AttributeValue::Flag(true),
+        ));
+    }
 }
 
 #[cfg(test)]

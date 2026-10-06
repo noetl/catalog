@@ -1,0 +1,25 @@
+[package]
+name = "catalog-ingest"
+description = "Makes the catalog reachable: walks a real source of NoETL documents, registers each through catalog-store, and drives the EHDB lifecycle."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "catalog"
+path = "src/main.rs"
+
+[dependencies]
+catalog-extract = { workspace = true }
+catalog-model = { workspace = true }
+catalog-store = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

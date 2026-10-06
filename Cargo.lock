@@ -27,6 +27,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalog-ingest"
+version = "0.1.0"
+dependencies = [
+ "catalog-extract",
+ "catalog-model",
+ "catalog-store",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "catalog-model"
 version = "0.1.0"
 dependencies = [
