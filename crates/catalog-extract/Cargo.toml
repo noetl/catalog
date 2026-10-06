@@ -1,0 +1,18 @@
+[package]
+name = "catalog-extract"
+description = "Extract catalog relations from NoETL playbook sources."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+catalog-model = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+
+[lints]
+workspace = true

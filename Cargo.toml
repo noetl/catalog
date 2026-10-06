@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/catalog-model", "crates/catalog-store"]
+members = ["crates/catalog-extract", "crates/catalog-model", "crates/catalog-store"]
 resolver = "2"
 
 [workspace.package]
@@ -26,6 +26,11 @@ thiserror = "2"
 ehdb-l0 = { git = "https://github.com/noetl/ehdb", tag = "v0.4.5" }
 ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.4.5" }
 catalog-model = { path = "crates/catalog-model" }
+
+# The playbook source is YAML. 0.9 is what noetl/server parses registration with, so
+# the extractor and the registrar agree about what a document means — a second YAML
+# implementation would be a second opinion on the thing being catalogued.
+serde_yaml = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
