@@ -4,7 +4,7 @@
 //! relation ops → folded back. Everything here goes through EHDB; nothing else is
 //! written.
 
-use catalog_model::{Entity, Provenance, RelationKind};
+use catalog_model::{AttributeValue, Entity, Provenance, RelationKind, ResourceType};
 use catalog_store::{CatalogStore, StoreConfig};
 
 /// The composition fixture, verbatim from `noetl/e2e` via `catalog-extract`'s copy.
@@ -45,9 +45,10 @@ fn a_real_playbook_registers_and_its_edges_are_readable() {
         COMPOSITION.len()
     );
 
-    let (_seq, n) = s
+    let r = s
         .register_from_source(entity(path), COMPOSITION, 1_760_000_000_000_000)
         .expect("register");
+    let n = r.relations;
 
     assert!(
         n > 0,
@@ -103,9 +104,10 @@ fn a_playbook_with_no_references_registers_with_no_edges() {
     let path = "vars_test/test_vars_block";
     assert!(LIST_FORM.len() > 500, "fixture did not load");
 
-    let (_seq, n) = s
+    let r = s
         .register_from_source(entity(path), LIST_FORM, 1)
         .expect("register");
+    let n = r.relations;
     assert_eq!(n, 0, "this playbook declares no references");
     assert!(s.relations_from(path).expect("read").is_empty());
 
@@ -138,10 +140,10 @@ fn a_playbook_with_no_references_registers_with_no_edges() {
 fn an_unparseable_source_still_registers_the_entity_with_no_edges() {
     let (mut s, _d) = store();
     let path = "broken/one";
-    let (_seq, n) = s
+    let r = s
         .register_from_source(entity(path), "workflow: [\n  - broken: {{{\n", 1)
         .expect("a storage call must succeed even when extraction cannot");
-    assert_eq!(n, 0, "no edges from an unparseable source");
+    assert_eq!(r.relations, 0, "no edges from an unparseable source");
     assert_eq!(
         s.latest(path).expect("latest").map(|e| e.version),
         Some(1),
@@ -155,10 +157,10 @@ fn a_subscription_registers_with_no_edges() {
     let (mut s, _d) = store();
     let mut e = entity("subs/one");
     e.resource_type = "subscription".into();
-    let (_seq, n) = s
+    let r = s
         .register_from_source(e, "kind: Subscription\nspec: {}\n", 1)
         .expect("register");
-    assert_eq!(n, 0);
+    assert_eq!(r.relations, 0);
     assert_eq!(
         s.latest("subs/one")
             .expect("latest")
@@ -192,4 +194,184 @@ fn two_parents_naming_one_child_each_keep_their_own_edge() {
             "the edge must name its own parent"
         );
     }
+}
+
+// ============================================================================
+// ⭐ subscription — a SECOND resource type, through the SAME four datasets
+// ============================================================================
+
+const SUBSCRIPTION: &str =
+    include_str!("../../catalog-extract/tests/fixtures/dedup_critical_stream.subscription.yaml");
+
+fn subscription_entity(path: &str) -> Entity {
+    Entity {
+        resource_type: "subscription".into(),
+        path: path.into(),
+        version: 1,
+        entity_id: 77,
+        content: None,
+        content_sha256: "s".repeat(64),
+        archived_at: None,
+    }
+}
+
+/// The generalization claim, end to end on real data.
+///
+/// A subscription shares nothing structurally with a playbook — no `workflow:`, a
+/// `spec:` instead, its reference at `spec.dispatch.playbook`, and an `auth` alias that
+/// is a dependency on a resource type the catalog deliberately does **not** hold. All
+/// of it lands in the same `c1`/`c2`/`c3` logs as a playbook, keyed by the same
+/// polymorphic identity.
+///
+/// ⚠ The companion assertion lives in `ac3_dataset_count_is_fixed.rs`: supporting this
+/// type added **no** `Dataset` impl. Without that, "it works" would not establish the
+/// claim — it would only establish that *something* works.
+#[test]
+fn a_real_subscription_registers_its_dispatch_auth_and_spec_through_the_same_store() {
+    let (mut s, _d) = store();
+    let path = "subscriptions/dedup_critical_stream";
+    assert!(
+        SUBSCRIPTION.len() > 500,
+        "the fixture is only {} bytes — it did not load, and every count below would \
+         then be a zero for the wrong reason",
+        SUBSCRIPTION.len()
+    );
+
+    // First declare the type — one appended row, no schema change.
+    s.declare_type(ResourceType::new("subscription", true, true))
+        .expect("declare type");
+
+    let r = s
+        .register_from_source(subscription_entity(path), SUBSCRIPTION, 1_700)
+        .expect("register");
+
+    assert_eq!(
+        r.relations, 2,
+        "a dispatch edge and an auth edge must both be recorded; got {}",
+        r.relations
+    );
+    assert!(
+        r.attributes >= 4,
+        "the fixture declares source/mode/activation/stream/consumer; got {}",
+        r.attributes
+    );
+
+    // --- the edges read back, with their kinds intact ---
+    let edges = s.relations_from(path).expect("read edges");
+    assert_eq!(edges.len(), 2, "{edges:?}");
+
+    let invokes = edges
+        .iter()
+        .find(|e| e.kind == RelationKind::Invokes)
+        .expect("the dispatch edge");
+    assert_eq!(invokes.to_entity.path, "tests/fixtures/sub_ingest_default");
+    assert_eq!(invokes.to_entity.resource_type, "playbook");
+
+    let requires = edges
+        .iter()
+        .find(|e| e.kind == RelationKind::Requires)
+        .expect("the auth edge");
+    assert_eq!(requires.to_entity.path, "nats_e2e");
+    assert_eq!(
+        requires.to_entity.resource_type, "credential",
+        "the auth alias names a credential — a type the catalog deliberately does not \
+         hold, yet the dependency is recorded"
+    );
+
+    // ⚠ The two edges must not collapse. An earlier shape hardcoded Invokes, which
+    // would have made the credential dependency unreadable while leaving a plausible
+    // edge count of 2.
+    assert_ne!(
+        invokes.kind, requires.kind,
+        "a cross-type dependency and an invocation are different claims"
+    );
+
+    // --- the attributes read back, typed ---
+    let attrs = s.attributes(path).expect("read attributes");
+    assert_eq!(
+        attrs.len(),
+        r.attributes,
+        "every recorded attribute must be readable back: {:?}",
+        attrs.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        attrs.get("spec.source").map(|a| &a.value),
+        Some(&AttributeValue::Text("nats".into()))
+    );
+    assert_eq!(
+        attrs.get("spec.mode").map(|a| &a.value),
+        Some(&AttributeValue::Text("pull".into()))
+    );
+
+    // --- and the entity itself, with its own resource_type ---
+    let e = s.latest(path).expect("latest").expect("registered");
+    assert_eq!(e.resource_type, "subscription");
+    assert_eq!(
+        s.resource_type("subscription")
+            .expect("type")
+            .map(|t| t.name),
+        Some("subscription".to_string()),
+        "the declared type must be readable from c4"
+    );
+}
+
+/// ⚠ A playbook and a subscription in ONE store must not contaminate each other.
+///
+/// Both live in the same four logs, so a partition or index-key mistake would make one
+/// readable under the other's path. This is the test that a shared store is actually
+/// shared correctly rather than coincidentally.
+#[test]
+fn a_playbook_and_a_subscription_coexist_without_contaminating_each_other() {
+    let (mut s, _d) = store();
+    let pb = "fixtures/playbooks/playbook_composition/playbook_composition";
+    let sub = "subscriptions/dedup_critical_stream";
+
+    s.register_from_source(entity(pb), COMPOSITION, 1)
+        .expect("playbook");
+    s.register_from_source(subscription_entity(sub), SUBSCRIPTION, 1)
+        .expect("subscription");
+
+    let pb_edges = s.relations_from(pb).expect("pb edges");
+    let sub_edges = s.relations_from(sub).expect("sub edges");
+
+    assert!(!pb_edges.is_empty(), "the playbook keeps its edges");
+    assert_eq!(sub_edges.len(), 2, "the subscription keeps its two edges");
+
+    for e in &pb_edges {
+        assert_eq!(
+            e.from_entity.path, pb,
+            "a playbook edge must name the playbook"
+        );
+    }
+    for e in &sub_edges {
+        assert_eq!(
+            e.from_entity.path, sub,
+            "a subscription edge must name the subscription"
+        );
+    }
+
+    // The playbook has no spec attributes; the subscription does. If the attribute log
+    // were keyed wrongly, these would bleed.
+    let pb_attrs = s.attributes(pb).expect("pb attrs");
+    let sub_attrs = s.attributes(sub).expect("sub attrs");
+    assert!(
+        !pb_attrs.keys().any(|k| k.starts_with("spec.")),
+        "the playbook must not acquire the subscription's spec attributes: {:?}",
+        pb_attrs.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        sub_attrs.keys().any(|k| k.starts_with("spec.")),
+        "the subscription must keep its own: {:?}",
+        sub_attrs.keys().collect::<Vec<_>>()
+    );
+
+    // And each entity keeps its own resource_type.
+    assert_eq!(
+        s.latest(pb).expect("l").map(|e| e.resource_type),
+        Some("playbook".to_string())
+    );
+    assert_eq!(
+        s.latest(sub).expect("l").map(|e| e.resource_type),
+        Some("subscription".to_string())
+    );
 }

@@ -10,6 +10,18 @@
 //! adding a `c5_mcp_entity` dataset because mcp "needs its own shape", which looks
 //! entirely reasonable in isolation and silently restores the per-entity-type table
 //! model this repo exists to replace.
+//!
+//! # ⭐ The claim is no longer only structural
+//!
+//! `subscription` is now supported as a real second resource type, and it shares
+//! **nothing** structurally with a playbook: no `workflow:` at all, a `spec:` instead,
+//! its reference at `spec.dispatch.playbook`, and a `spec.auth` alias that depends on a
+//! resource type the catalog deliberately does not hold. Measured on the `noetl/e2e`
+//! corpus, **9 of 9** `kind: Subscription` fixtures carry that dispatch reference.
+//!
+//! Supporting it added **zero** datasets, which is what this test asserts. So the count
+//! below is not an abstract invariant about a synthetic `widget` — it is the record of a
+//! second real type having gone in without reshaping the store.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -95,8 +107,10 @@ fn the_dataset_count_is_exactly_four_and_must_stay_four() {
         EXPECTED_DATASETS,
         "expected exactly {EXPECTED_DATASETS} `Dataset` impls, found {}:\n  {}\n\n\
          If you are adding a RESOURCE TYPE, you do not need a dataset — append a \
-         `ResourceType` record instead. That is the whole point of the model, and \
-         this assertion is what keeps it true.\n\
+         `ResourceType` record instead. `subscription` went in that way, with a \
+         completely different content shape and a cross-type dependency, and this \
+         number did not move. That is the whole point of the model, and this assertion \
+         is what keeps it true.\n\
          If you are genuinely adding a fifth *kind of log* (not a resource type), \
          raise this number deliberately and say why in the spec. Do not relax it to \
          a floor: `>=` cannot detect the failure this guards against, because the \

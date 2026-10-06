@@ -66,6 +66,22 @@ impl StoreConfig {
     }
 }
 
+/// What one [`CatalogStore::register_from_source`] recorded.
+///
+/// The counts are returned separately rather than summed, because they answer different
+/// questions and a single total would hide a zero. A subscription with 2 edges and 0
+/// attributes and one with 0 edges and 2 attributes are very different situations, and
+/// "2" would describe both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Registered {
+    /// The entity op's sequence number.
+    pub op_seq: u64,
+    /// Relations appended to `c2`.
+    pub relations: usize,
+    /// Attributes appended to `c3`.
+    pub attributes: usize,
+}
+
 /// The catalog's four logs and the folds over them.
 pub struct CatalogStore {
     entities: L0Engine<EntityDataset>,
@@ -180,7 +196,8 @@ impl CatalogStore {
     /// registered referencing a child that does not exist and nothing says so until
     /// the step runs. Here the edges are recorded alongside the entity.
     ///
-    /// Returns `(entity_op_seq, relations_recorded)`.
+    /// Returns [`Registered`] — the entity's op sequence plus how many relations and
+    /// attributes were recorded.
     ///
     /// # ⚠ The entity is registered even when extraction finds nothing
     ///
@@ -196,20 +213,33 @@ impl CatalogStore {
         entity: Entity,
         source: &str,
         extracted_at: i64,
-    ) -> Result<(u64, usize)> {
+    ) -> Result<Registered> {
         let parent = entity.as_ref_pinned();
+        let path = entity.path.clone();
+        let entity_id = entity.entity_id;
+
         // Extract BEFORE the append, so a malformed source cannot leave a
         // half-registered entity with no edges and no record of why.
         let found = catalog_extract::find_references(source).unwrap_or_default();
         let rels = catalog_extract::relations_from(&parent, &found, extracted_at);
+        let attrs = catalog_extract::find_attributes(source, entity_id).unwrap_or_default();
 
-        let seq = self.register(entity)?;
-        let mut n = 0;
+        let op_seq = self.register(entity)?;
+        let mut relations = 0;
         for r in rels {
             self.assert_relation(r)?;
-            n += 1;
+            relations += 1;
         }
-        Ok((seq, n))
+        let mut attributes = 0;
+        for a in attrs {
+            self.set_attribute(&path, a)?;
+            attributes += 1;
+        }
+        Ok(Registered {
+            op_seq,
+            relations,
+            attributes,
+        })
     }
 
     // --- reads (folds) ------------------------------------------------------

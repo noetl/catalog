@@ -22,6 +22,7 @@ name = "catalog-extract"
 version = "0.1.0"
 dependencies = [
  "catalog-model",
+ "serde_json",
  "serde_yaml",
 ]
 

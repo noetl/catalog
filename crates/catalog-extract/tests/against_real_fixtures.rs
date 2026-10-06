@@ -8,6 +8,9 @@
 //! | `playbook_composition.yaml` | the worked composition case — a real `kind: playbook` reference |
 //! | `save_delegation_test.yaml` | a reference alongside unrelated tools |
 //! | `test_vars_block.yaml` | **list-form tools and no references** — the negative control |
+//! | `dedup_critical_stream.subscription.yaml` | a **subscription**: no `workflow:`, a `spec.dispatch.playbook`, and a `spec.auth` alias |
+//! | `webhook_orders.subscription.yaml` | a second subscription, different source/mode |
+//! | `hook_bearer.subscription.yaml` | a subscription with **no** `spec.auth` — the contrast |
 //!
 //! ⚠ The third one is the important one. It is the file that proved
 //! [noetl/ai-meta#432](https://github.com/noetl/ai-meta/issues/432): five list-form
@@ -224,8 +227,159 @@ fn every_bundled_fixture_parses_and_the_set_is_not_empty() {
     }
     println!("fixtures parsed: {n}");
     assert_eq!(
-        n, 3,
-        "expected 3 bundled fixtures, found {n} — a loop over an empty directory \
-         passes every assertion inside it"
+        n, 6,
+        "expected 6 bundled fixtures — 3 playbooks and 3 subscriptions — found {n}. \
+         Exact rather than a floor: a loop over an empty directory passes every \
+         assertion inside it, and a count that drifts silently means the suite below \
+         is covering less than it claims."
+    );
+}
+
+// ============================================================================
+// subscription — the real second resource type
+// ============================================================================
+
+/// ⭐ The generalization claim, on real data.
+///
+/// A subscription shares **nothing** structurally with a playbook: no `workflow:`, a
+/// `spec:` instead, and its reference lives at `spec.dispatch.playbook`. Supporting it
+/// added no dataset and no schema — `catalog-store`'s AC3 guard pins the `Dataset` impl
+/// count at four.
+///
+/// Measured on the corpus: **9 of 9** `kind: Subscription` fixtures carry a
+/// `spec.dispatch.playbook`, and the playbooks they name sit in the same directory, so
+/// the cross-type graph is closed.
+#[test]
+fn a_real_subscription_yields_its_dispatch_and_auth_edges() {
+    let src = fixture("dedup_critical_stream.subscription.yaml");
+    assert_eq!(
+        catalog_extract::resource_kind(&src)
+            .expect("parse")
+            .as_deref(),
+        Some("subscription"),
+        "this fixture must declare kind: Subscription"
+    );
+
+    let got = find_references(&src).expect("parse");
+    println!(
+        "dedup_critical_stream: {} edge(s) -> {:?}",
+        got.len(),
+        got.iter()
+            .map(|r| (r.via.location(), r.path.as_str()))
+            .collect::<Vec<_>>()
+    );
+
+    assert_eq!(got.len(), 2, "a dispatch edge and an auth edge: {got:?}");
+
+    let dispatch = got
+        .iter()
+        .find(|r| r.relation == catalog_model::RelationKind::Invokes)
+        .expect("the dispatch edge");
+    assert_eq!(dispatch.path, "tests/fixtures/sub_ingest_default");
+    assert_eq!(dispatch.target_type, "playbook");
+    assert_eq!(dispatch.via.location(), "spec.dispatch.playbook");
+
+    let auth = got
+        .iter()
+        .find(|r| r.relation == catalog_model::RelationKind::Requires)
+        .expect("the auth edge");
+    assert_eq!(auth.path, "nats_e2e");
+    assert_eq!(
+        auth.target_type, "credential",
+        "an auth alias names a credential — deliberately not catalogued, but the \
+         dependency is still worth recording"
+    );
+}
+
+/// ⚠ The contrast that makes the auth edge above non-incidental.
+///
+/// `hook_bearer` has a `dispatch.playbook` and **no** `spec.auth`, so it must yield
+/// exactly one edge. If both fixtures yielded two, the auth arm would be firing on
+/// something other than `spec.auth`.
+#[test]
+fn a_subscription_without_an_auth_alias_yields_only_its_dispatch_edge() {
+    let src = fixture("hook_bearer.subscription.yaml");
+    assert!(
+        !src.contains("\n  auth:"),
+        "this fixture was chosen because it has no spec-level auth; if it gained one \
+         the contrast below is gone"
+    );
+    let got = find_references(&src).expect("parse");
+    assert_eq!(got.len(), 1, "dispatch only, no auth: {got:?}");
+    assert_eq!(got[0].relation, catalog_model::RelationKind::Invokes);
+    assert_eq!(got[0].path, "tests/fixtures/handle_webhook");
+}
+
+/// Every bundled subscription carries a dispatch edge, matching the 9-of-9 corpus
+/// measurement.
+#[test]
+fn every_bundled_subscription_has_a_dispatch_edge() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut subs = 0;
+    for e in std::fs::read_dir(&dir).expect("fixtures").flatten() {
+        let p = e.path();
+        if !p.to_string_lossy().contains(".subscription.yaml") {
+            continue;
+        }
+        subs += 1;
+        let src = std::fs::read_to_string(&p).expect("read");
+        let got = find_references(&src).expect("parse");
+        assert!(
+            got.iter()
+                .any(|r| r.relation == catalog_model::RelationKind::Invokes),
+            "{} must carry a dispatch edge: {got:?}",
+            p.display()
+        );
+    }
+    println!("subscriptions examined: {subs}");
+    assert_eq!(
+        subs, 3,
+        "expected 3 bundled subscriptions, found {subs} — the loop above proves \
+         nothing over an empty set"
+    );
+}
+
+/// A subscription's spec scalars become typed attributes, on real data.
+#[test]
+fn a_real_subscription_yields_typed_spec_attributes() {
+    let src = fixture("dedup_critical_stream.subscription.yaml");
+    let attrs = catalog_extract::find_attributes(&src, 42).expect("parse");
+    let by: std::collections::BTreeMap<&str, &catalog_model::AttributeValue> =
+        attrs.iter().map(|a| (a.name.as_str(), &a.value)).collect();
+    println!("attributes: {:?}", by.keys().collect::<Vec<_>>());
+
+    assert!(
+        attrs.len() >= 4,
+        "the real fixture declares source/mode/activation/stream/consumer; got {:?}",
+        by.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        by.get("spec.source"),
+        Some(&&catalog_model::AttributeValue::Text("nats".into()))
+    );
+    assert_eq!(
+        by.get("spec.mode"),
+        Some(&&catalog_model::AttributeValue::Text("pull".into()))
+    );
+    // ⚠ `runtime:` is a nested mapping in this fixture and must not be flattened.
+    assert!(
+        !by.keys().any(|k| k.starts_with("spec.runtime")),
+        "a nested mapping is structure, not an attribute: {:?}",
+        by.keys().collect::<Vec<_>>()
+    );
+    assert!(attrs.iter().all(|a| a.entity_id == 42));
+}
+
+/// ⚠ A playbook fixture must yield NO subscription attributes.
+///
+/// Without this, the attribute arm could be firing for every kind and the subscription
+/// test above would still pass.
+#[test]
+fn a_real_playbook_yields_no_subscription_spec_attributes() {
+    let src = fixture("playbook_composition.yaml");
+    let attrs = catalog_extract::find_attributes(&src, 1).expect("parse");
+    assert!(
+        !attrs.iter().any(|a| a.name.starts_with("spec.")),
+        "a playbook must not acquire subscription spec attributes: {attrs:?}"
     );
 }
