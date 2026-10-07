@@ -161,6 +161,20 @@ pub const REVERSE_KEY_PREFIX: &str = "\u{1}attr/";
 /// `\u{1}` finds every synthetic key in the crate.
 pub const TYPE_KEY_PREFIX: &str = "\u{1}type/";
 
+/// The prefix marking a `c2` row as a **reverse-edge** row rather than a forward one.
+///
+/// Third application of the same device. The forward index answers "what does X
+/// call"; this answers **"what calls X"**, which is the direction that matters when
+/// changing or retiring a resource. Measured on the real corpus:
+/// `automation/agents/mcp/firestore` has **2 callers** and neither was reachable
+/// without scanning every path in the catalog.
+pub const EDGE_TO_KEY_PREFIX: &str = "\u{1}to/";
+
+/// The reverse-edge key for a target path.
+pub fn edge_to_key(to_path: &str) -> String {
+    format!("{EDGE_TO_KEY_PREFIX}{to_path}")
+}
+
 /// The type-index key for a resource-type name. Lowercased, because
 /// `resource_type()` folds on the lowercased name and noetl/server#429 was a real
 /// prod bug caused by two spellings of one kind.
@@ -344,7 +358,25 @@ impl Dataset for AttributeDataset {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum RelationOpKind {
     Asserted(Box<Relation>),
-    Retracted { to: Box<EntityRef>, kind: String },
+    Retracted {
+        to: Box<EntityRef>,
+        kind: String,
+    },
+    /// A **reverse-edge** row: "something at `from_path` points at the target named
+    /// by `index`".
+    ///
+    /// ⚠ The edge identity here is `(from_path, kind)` — the *source* varies under one
+    /// reverse key, where the forward fold varies the target. Folding this per
+    /// `edge_key()` would be wrong: every caller of one target shares the same
+    /// `(to_path, to_version, kind)`, so they would collapse to one.
+    ReverseEdge {
+        index: String,
+        from_path: String,
+        kind: String,
+        /// `false` is a retraction tombstone, so a removed edge leaves the caller
+        /// list instead of accumulating forever.
+        live: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,7 +402,17 @@ impl RelationOp {
                 format!("{:?}", r.kind),
             ),
             RelationOpKind::Retracted { to, kind } => (to.path.clone(), to.version, kind.clone()),
+            // A reverse row keyed by its own identity, so it can never collapse a
+            // forward entry if the two key spaces ever met.
+            RelationOpKind::ReverseEdge {
+                from_path, kind, ..
+            } => (from_path.clone(), None, kind.clone()),
         }
+    }
+
+    /// Whether this is a reverse-edge row.
+    pub fn is_reverse_edge(&self) -> bool {
+        matches!(self.op, RelationOpKind::ReverseEdge { .. })
     }
 }
 
@@ -384,11 +426,16 @@ impl Dataset for RelationDataset {
     fn sort_key(r: &RelationOp) -> u64 {
         r.op_seq
     }
+    /// Derived from [`Self::index_key`] — see the note on [`AttributeDataset::partition`].
     fn partition(r: &RelationOp, shard_count: u32) -> u32 {
-        shard_for_execution(&r.from_path, shard_count)
+        shard_for_execution(Self::index_key(r), shard_count)
     }
+
     fn index_key(r: &RelationOp) -> &str {
-        &r.from_path
+        match &r.op {
+            RelationOpKind::ReverseEdge { index, .. } => index.as_str(),
+            _ => &r.from_path,
+        }
     }
     fn read_partition(from_path: &str, shard_count: u32) -> u32 {
         shard_for_execution(from_path, shard_count)

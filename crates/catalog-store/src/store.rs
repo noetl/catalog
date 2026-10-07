@@ -376,15 +376,104 @@ impl CatalogStore {
         self.attributes.append_writer_assigned(op)
     }
 
+    /// Assert an edge, writing the forward row **and** its reverse-edge row.
+    ///
+    /// Forward first, for the same reason as the other two indexes: a crash between
+    /// them leaves the forward answer complete and the caller list short by one.
     pub fn assert_relation(&mut self, rel: Relation) -> Result<u64> {
+        let from = rel.from_entity.path.clone();
+        let to = rel.to_entity.path.clone();
+        let kind = format!("{:?}", rel.kind);
         let op = RelationOp {
             // Assigned by the engine in `append_writer_assigned`; see
             // `Dataset::assign_sort_key`. A placeholder here, never the real key.
             op_seq: 0,
-            from_path: rel.from_entity.path.clone(),
+            from_path: from.clone(),
             op: RelationOpKind::Asserted(Box::new(rel)),
         };
+        let forward_seq = self.relations.append_writer_assigned(op)?;
+        self.write_reverse_edge(&to, &from, &kind, true)?;
+        Ok(forward_seq)
+    }
+
+    /// Retract an edge, tombstoning its reverse row so the caller list shrinks.
+    pub fn retract_relation(
+        &mut self,
+        from_path: &str,
+        to: catalog_model::EntityRef,
+        kind: &str,
+    ) -> Result<u64> {
+        let to_path = to.path.clone();
+        let op = RelationOp {
+            op_seq: 0,
+            from_path: from_path.to_string(),
+            op: RelationOpKind::Retracted {
+                to: Box::new(to),
+                kind: kind.to_string(),
+            },
+        };
+        let forward_seq = self.relations.append_writer_assigned(op)?;
+        self.write_reverse_edge(&to_path, from_path, kind, false)?;
+        Ok(forward_seq)
+    }
+
+    fn write_reverse_edge(
+        &mut self,
+        to_path: &str,
+        from_path: &str,
+        kind: &str,
+        live: bool,
+    ) -> Result<u64> {
+        let op = RelationOp {
+            op_seq: 0,
+            // For a reverse row `from_path` is the ANSWER; the key is the target.
+            from_path: from_path.to_string(),
+            op: RelationOpKind::ReverseEdge {
+                index: crate::datasets::edge_to_key(to_path),
+                from_path: from_path.to_string(),
+                kind: kind.to_string(),
+                live,
+            },
+        };
         self.relations.append_writer_assigned(op)
+    }
+
+    /// **Who calls this?** Every live source that points at `to_path`.
+    ///
+    /// The direction that matters when changing or retiring a resource:
+    /// `relations_from` says what a playbook invokes, and this says who would break.
+    ///
+    /// ⚠ Folded per `(from_path, kind)`, **not** per `edge_key()`. Under one reverse
+    /// key every caller shares the same `(to_path, to_version, kind)`, so folding by
+    /// the edge identity would collapse all callers into one — the same partial-answer
+    /// shape the sibling indexes measured at 1 of 49 and 1 of 53. Here it would read
+    /// 1 of however many callers a shared dependency has, which for a central MCP
+    /// playbook is the whole point of asking.
+    ///
+    /// Returns `(from_path, kind)` pairs, sorted.
+    pub fn relations_to(&self, to_path: &str) -> Result<Vec<(String, String)>> {
+        let key = crate::datasets::edge_to_key(to_path);
+        let ops = self.relations.read_index_after(&key, 0)?;
+        let folded = fold_latest_by(ops, |o| match &o.op {
+            RelationOpKind::ReverseEdge {
+                from_path, kind, ..
+            } => (from_path.clone(), kind.clone()),
+            _ => (o.from_path.clone(), String::new()),
+        });
+        let mut out: Vec<(String, String)> = folded
+            .into_values()
+            .filter_map(|op| match op.op {
+                RelationOpKind::ReverseEdge {
+                    from_path,
+                    kind,
+                    live: true,
+                    ..
+                } => Some((from_path, kind)),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        Ok(out)
     }
 
     pub fn declare_type(&mut self, t: ResourceType) -> Result<u64> {
@@ -580,11 +669,15 @@ impl CatalogStore {
     /// Every live outgoing edge from `from_path`.
     pub fn relations_from(&self, from_path: &str) -> Result<Vec<Relation>> {
         let ops = self.relations.read_index_after(from_path, 0)?;
+        // Reverse rows excluded from the fold INPUT, as in the sibling indexes.
+        let ops: Vec<_> = ops.into_iter().filter(|o| !o.is_reverse_edge()).collect();
         let folded = fold_latest_by(ops, |o| o.edge_key());
         Ok(folded
             .into_values()
             .filter_map(|op| match op.op {
                 RelationOpKind::Asserted(r) => Some(*r),
+                // Unreachable: filtered above.
+                RelationOpKind::ReverseEdge { .. } => None,
                 RelationOpKind::Retracted { .. } => None,
             })
             .collect())
