@@ -135,9 +135,9 @@ fn who_calls_this_returns_every_caller_not_one() {
         vec![
             (
                 "muno/playbooks/itinerary-planner".to_string(),
-                "Invokes".to_string()
+                "invokes".to_string()
             ),
-            ("muno/playbooks/profile".to_string(), "Invokes".to_string()),
+            ("muno/playbooks/profile".to_string(), "invokes".to_string()),
         ]
     );
 
@@ -148,14 +148,14 @@ fn who_calls_this_returns_every_caller_not_one() {
             .expect("rev"),
         vec![(
             "muno/playbooks/flights-details".to_string(),
-            "Invokes".to_string()
+            "invokes".to_string()
         )]
     );
     assert_eq!(
         store
             .relations_to("automation/agents/mcp/google-places")
             .expect("rev"),
-        vec![("muno/playbooks/profile".to_string(), "Invokes".to_string())]
+        vec![("muno/playbooks/profile".to_string(), "invokes".to_string())]
     );
 
     // A target nobody calls: empty, not an error and not everything.
@@ -184,7 +184,7 @@ fn a_shared_dependency_reports_all_of_its_callers() {
         let from = format!("muno/playbooks/caller_{i:02}");
         store.register(entity(&from)).expect("reg");
         store.assert_relation(edge(&from, "shared/dep")).expect("e");
-        callers.push((from, "Invokes".to_string()));
+        callers.push((from, "invokes".to_string()));
     }
     callers.sort();
 
@@ -214,7 +214,7 @@ fn retracting_removes_the_caller() {
                 path: "automation/agents/mcp/firestore".into(),
                 version: None,
             },
-            "Invokes",
+            "invokes",
         )
         .expect("retract");
 
@@ -226,7 +226,7 @@ fn retracting_removes_the_caller() {
         got,
         vec![(
             "muno/playbooks/itinerary-planner".to_string(),
-            "Invokes".to_string()
+            "invokes".to_string()
         )],
         "the retracted caller is still listed"
     );

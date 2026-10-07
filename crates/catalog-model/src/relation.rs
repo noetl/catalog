@@ -25,7 +25,10 @@ use crate::EntityRef;
 use serde::{Deserialize, Serialize};
 
 /// What kind of edge this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// ⚠ NOT `Copy`: `References` carries a `ForeignKey` with owned columns. Dropping
+// `Copy` is the honest consequence of making the FK first-class — a kind is no longer
+// a bare tag. Callers clone it; the type is small and relations are not a hot loop.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationKind {
     /// A step with `kind: playbook` names another resource by path.
@@ -39,17 +42,146 @@ pub enum RelationKind {
     Requires,
     /// A memory or documentation entity describing another entity.
     Annotates,
+    /// **A foreign key.** The reference a relational schema declares between two
+    /// rows, carrying the semantics the constraint actually has.
+    ///
+    /// # Why this is a distinct kind rather than a reuse of `Requires`
+    ///
+    /// Measured: a probe expressing an adiona slice had to abuse `Requires` for every
+    /// FK, and `relations_to("category/10")` then returned the self-referencing
+    /// hierarchy parent **and** the `trip_category` M:N join as
+    /// `[("category/11", "Requires"), ("trip/100", "Requires")]` — two semantically
+    /// different references, indistinguishable in the answer. A reader asking "what
+    /// references this row" got a list it could not interpret.
+    ///
+    /// # Why the payload, and not just a bare `References`
+    ///
+    /// The three fields are the ones a reader needs and cannot recover: whether the
+    /// reference may be absent, which direction the multiplicity runs, and what
+    /// happens to the referent on delete. `ON DELETE NO ACTION` and `ON DELETE
+    /// CASCADE` are different claims about whether the target can be removed at all,
+    /// which is exactly the question `relations_to` exists to answer.
+    References(ForeignKey),
+}
+
+/// The semantics of one foreign key, as its DDL declared them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForeignKey {
+    /// Whether the referencing column admits NULL — i.e. whether the reference is
+    /// optional. `categories.master_category_id` is nullable (a root category has no
+    /// parent); `categories.category_type_id` is `NOT NULL`.
+    pub nullable: bool,
+    /// Which way the multiplicity runs.
+    pub cardinality: Cardinality,
+    /// What the DDL says happens on delete of the referent.
+    pub on_delete: ReferentialAction,
+    /// The referencing column(s), in DDL order. A composite FK has more than one.
+    pub columns: Vec<String>,
+    /// The constraint name, when the DDL named it. adiona names most of its
+    /// (`r_category_type_category_type_id`), which is the only handle an operator has
+    /// when the database complains.
+    pub constraint_name: Option<String>,
+}
+
+impl ForeignKey {
+    /// The common case: a `NOT NULL` many-to-one with `ON DELETE NO ACTION`, which is
+    /// what adiona declares almost everywhere.
+    pub fn many_to_one(column: impl Into<String>) -> Self {
+        Self {
+            nullable: false,
+            cardinality: Cardinality::ManyToOne,
+            on_delete: ReferentialAction::NoAction,
+            columns: vec![column.into()],
+            constraint_name: None,
+        }
+    }
+
+    /// Mark this reference optional (the column admits NULL).
+    pub fn optional(mut self) -> Self {
+        self.nullable = true;
+        self
+    }
+
+    /// Record the DDL's constraint name.
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.constraint_name = Some(name.into());
+        self
+    }
+
+    /// Set the on-delete action.
+    pub fn on_delete(mut self, action: ReferentialAction) -> Self {
+        self.on_delete = action;
+        self
+    }
+}
+
+/// Which way a reference's multiplicity runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cardinality {
+    OneToOne,
+    /// The usual FK: many referencing rows, one referent.
+    ManyToOne,
+    OneToMany,
+    /// Each side of a join table's pair of FKs, taken together.
+    ManyToMany,
+}
+
+/// What a DDL says happens to a referencing row when its referent is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferentialAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
 }
 
 impl RelationKind {
-    /// Every variant. For exhaustive iteration in guards.
-    pub const ALL: [RelationKind; 5] = [
-        Self::Invokes,
-        Self::DerivesFrom,
-        Self::Supersedes,
-        Self::Requires,
-        Self::Annotates,
-    ];
+    /// Every variant, with a representative payload for `References`.
+    ///
+    /// ⚠ This is for exhaustive iteration, so the `References` payload here is
+    /// arbitrary. Anything that compares *kinds* must use [`Self::discriminant`], not
+    /// equality against a member of this array.
+    pub fn all() -> Vec<RelationKind> {
+        vec![
+            Self::Invokes,
+            Self::DerivesFrom,
+            Self::Supersedes,
+            Self::Requires,
+            Self::Annotates,
+            Self::References(ForeignKey::many_to_one("id")),
+        ]
+    }
+
+    /// The **kind label**, independent of any payload.
+    ///
+    /// ⚠⚠ This exists because the edge identity must not include FK metadata. The two
+    /// places that key an edge by its kind used `format!("{:?}", kind)`, which for a
+    /// data-carrying variant renders the whole payload — so the *same* foreign key
+    /// re-asserted with `nullable` corrected would become a **different edge**, and a
+    /// retraction naming it would not match the row it meant to remove. The edge is
+    /// identified by (target, version, kind); the payload is a property *of* that edge.
+    pub fn discriminant(&self) -> &'static str {
+        match self {
+            Self::Invokes => "invokes",
+            Self::DerivesFrom => "derives_from",
+            Self::Supersedes => "supersedes",
+            Self::Requires => "requires",
+            Self::Annotates => "annotates",
+            Self::References(_) => "references",
+        }
+    }
+
+    /// The foreign-key payload, when this is a `References`.
+    pub fn foreign_key(&self) -> Option<&ForeignKey> {
+        match self {
+            Self::References(fk) => Some(fk),
+            _ => None,
+        }
+    }
 }
 
 /// How we know a relation exists.
@@ -174,13 +306,13 @@ mod tests {
     #[test]
     fn every_relation_kind_round_trips() {
         assert_eq!(
-            RelationKind::ALL.len(),
-            5,
-            "ALL must list every variant; a missing one would make this loop \
+            RelationKind::all().len(),
+            6,
+            "all() must list every variant; a missing one would make this loop \
              silently cover less than it claims"
         );
-        for k in RelationKind::ALL {
-            let r = rel(k, Provenance::Declared);
+        for k in RelationKind::all() {
+            let r = rel(k.clone(), Provenance::Declared);
             let back: Relation =
                 serde_json::from_str(&serde_json::to_string(&r).expect("ser")).expect("de");
             assert_eq!(back.kind, k, "{k:?} must survive a round trip");
@@ -191,13 +323,14 @@ mod tests {
     fn all_is_exhaustive_against_the_match() {
         // A total match: adding a variant without adding it to ALL fails to compile
         // here, rather than silently shrinking every guard that iterates ALL.
-        for k in RelationKind::ALL {
+        for k in RelationKind::all() {
             let covered = match k {
                 RelationKind::Invokes => true,
                 RelationKind::DerivesFrom => true,
                 RelationKind::Supersedes => true,
                 RelationKind::Requires => true,
                 RelationKind::Annotates => true,
+                RelationKind::References(_) => true,
             };
             assert!(covered);
         }

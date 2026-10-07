@@ -243,7 +243,7 @@ pub fn relations_from(
                 // source never made — the same reasoning that gives EHDB's
                 // `prev_event_id` no `Default`.
                 EntityRef::latest(&f.target_type, &f.path),
-                f.relation,
+                f.relation.clone(),
                 Provenance::Extracted { at: extracted_at },
             )
         })
@@ -760,7 +760,7 @@ mod tests {
 
         // ⚠ The two edges must NOT collapse into one kind. An earlier shape hardcoded
         // Invokes, which would have made the credential dependency unreadable.
-        let kinds: Vec<RelationKind> = rels.iter().map(|r| r.kind).collect();
+        let kinds: Vec<RelationKind> = rels.iter().map(|r| r.kind.clone()).collect();
         assert!(kinds.contains(&RelationKind::Invokes));
         assert!(kinds.contains(&RelationKind::Requires));
 

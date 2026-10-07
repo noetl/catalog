@@ -383,7 +383,10 @@ impl CatalogStore {
     pub fn assert_relation(&mut self, rel: Relation) -> Result<u64> {
         let from = rel.from_entity.path.clone();
         let to = rel.to_entity.path.clone();
-        let kind = format!("{:?}", rel.kind);
+        // The kind LABEL — see the note in `RelationOp::edge_key`. The reverse index
+        // must answer with a label a reader can interpret ("references"), not a
+        // Debug-rendered struct.
+        let kind = rel.kind.discriminant().to_string();
         let op = RelationOp {
             // Assigned by the engine in `append_writer_assigned`; see
             // `Dataset::assign_sort_key`. A placeholder here, never the real key.
@@ -397,12 +400,31 @@ impl CatalogStore {
     }
 
     /// Retract an edge, tombstoning its reverse row so the caller list shrinks.
+    /// Retract an edge, tombstoning its reverse row so the caller list shrinks.
+    ///
+    /// ⚠⚠ `kind` is the **discriminant label** (`"references"`, `"invokes"`), not a
+    /// `Debug` rendering. An unknown label is REFUSED rather than written, because a
+    /// tombstone that matches no edge is a silent no-op: the caller believes the edge
+    /// is gone, `relations_from` still returns it, and nothing errored. This was
+    /// observed for real when the labels changed from `Debug` casing (`"Invokes"`) to
+    /// the discriminant (`"invokes"`) — a retraction passing the old spelling appended
+    /// a tombstone that matched nothing.
     pub fn retract_relation(
         &mut self,
         from_path: &str,
         to: catalog_model::EntityRef,
         kind: &str,
     ) -> Result<u64> {
+        let known: Vec<&str> = catalog_model::RelationKind::all()
+            .iter()
+            .map(|k| k.discriminant())
+            .collect();
+        if !known.contains(&kind) {
+            return Err(ehdb_core::EhdbError::InvalidIdentifier(format!(
+                "unknown relation kind {kind:?}; a tombstone with an unrecognised kind \
+                 would match no edge and silently no-op. Known: {known:?}"
+            )));
+        }
         let to_path = to.path.clone();
         let op = RelationOp {
             op_seq: 0,
