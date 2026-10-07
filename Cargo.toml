@@ -39,6 +39,17 @@ catalog-store = { path = "crates/catalog-store" }
 # implementation would be a second opinion on the thing being catalogued.
 serde_yaml = "0.9"
 
+# The fleet's metrics crate, at the version noetl/server pins, so a scrape from this
+# crate and from the server render identically.
+#
+# ⚠⚠ `Registry::gather` PRUNES metric families with no children (prometheus
+# `registry.rs`), so a labelled metric is ABSENT until something increments it —
+# registering it is not enough. A missing series then looks the same as a healthy
+# zero, a broken exporter, and a binary too old to carry the metric. Every closed
+# label set in this crate is therefore pinned at 0 UNCONDITIONALLY; see
+# `catalog_store::metrics`.
+prometheus = "0.13"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
