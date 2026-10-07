@@ -546,9 +546,33 @@ impl CatalogStore {
             // `Dataset::assign_sort_key`. A placeholder here, never the real key.
             op_seq: 0,
             name: t.name.clone(),
-            declared: t,
+            declared: t.clone(),
         };
-        self.types.append_writer_assigned(op)
+        let seq = self.types.append_writer_assigned(op)?;
+        // And index it under the registry key, so the set of declared types is
+        // enumerable. Without this a declared type is reachable only if you already
+        // know its name — see `TYPE_REGISTRY_KEY` for why that was a real defect.
+        self.types.append_writer_assigned(TypeOp {
+            op_seq: 0,
+            name: crate::datasets::TYPE_REGISTRY_KEY.to_string(),
+            declared: t,
+        })?;
+        Ok(seq)
+    }
+
+    /// Every type declared in this store, in name order.
+    ///
+    /// Reads the one registry key rather than scanning, because the engine offers no
+    /// scan. A type declared before the registry existed is **not** listed — the index
+    /// is built at write time, so this is append-only history, not a migration.
+    pub fn resource_types(&self) -> Result<Vec<ResourceType>> {
+        let ops = self
+            .types
+            .read_index_after(crate::datasets::TYPE_REGISTRY_KEY, 0)?;
+        let folded = fold_latest_by(ops, |o| o.declared.name.clone());
+        let mut out: Vec<ResourceType> = folded.into_values().map(|o| o.declared).collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
     }
 
     /// Register a playbook from its source, recording the references it declares.
