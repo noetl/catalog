@@ -27,12 +27,28 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # ⚠⚠ NO @semantic-release/git PLUGIN, deliberately.
+      #
+      # My first version of this file used it to commit a CHANGELOG back to `main`, and
+      # the first release failed outright:
+      #
+      #   remote: error: GH006: Protected branch update failed for refs/heads/main.
+      #   remote: - Required status check "rust" is expected.
+      #
+      # The bot's commit is `[skip ci]`, so the required check never RUNS on it and stays
+      # "expected" forever — that push can never be accepted. noetl/server's release.yml
+      # already carries this exact warning (noetl/ai-meta#330) and I reproduced the bug
+      # anyway. Pushing is also the thing that made a manual Cargo.toml bump look
+      # mandatory, which is the 2026-08-03 version regression.
+      #
+      # So the bot tags and creates a GitHub Release and NEVER writes to `main`.
+      # Cargo.toml's version is a FLOOR that lags by design; ci/stamp-version.sh re-stamps
+      # at build time from the tag, which is the authority.
       - uses: cycjimmy/semantic-release-action@v4
         id: semantic
         with:
           extra_plugins: |
-            @semantic-release/changelog
-            @semantic-release/git
+            conventional-changelog-conventionalcommits@8.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # ⚠ Report whether a version was actually produced. A run that chose NO release is
@@ -46,3 +62,26 @@ jobs:
             echo "NO release was produced from these commits — the image was NOT rebuilt."
             echo "If this change needs to reach a cluster, it needs a fix:/feat: subject."
           fi
+
+      # ⚠⚠ A tag created with GITHUB_TOKEN does NOT trigger workflows — GitHub blocks that
+      # to prevent recursion. `release-catalog` is declared `on: push: tags: ['v*']` and
+      # would therefore NEVER fire for a bot-pushed tag: the version gets tagged, the
+      # GitHub Release is created, every run is green, and NO IMAGE IS BUILT.
+      # noetl-server 2.0.0 was tagged and never published for exactly this reason.
+      - name: Trigger release-catalog
+        if: ${{ steps.semantic.outputs.new_release_published == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The version comes from semantic-release, never from Cargo.toml: the bot does
+          # not push its bump, so Cargo.toml is a stale floor here and reading it would
+          # dispatch a release for the PREVIOUS version — and look entirely successful.
+          VERSION="${{ steps.semantic.outputs.new_release_version }}"
+          if [ -z "$VERSION" ]; then
+            echo "no new_release_version from semantic-release; refusing to guess" >&2
+            exit 1
+          fi
+          gh workflow run release.yml --ref main -f version="$VERSION"
+          echo "dispatched release-catalog for $VERSION"
