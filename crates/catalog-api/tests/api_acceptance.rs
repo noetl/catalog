@@ -135,7 +135,31 @@ async fn the_whole_catalog_is_exercisable_over_http() {
     let known: Vec<String> = serde_json::from_value(b["known_noetl_types"].clone()).expect("k");
     let declared: Vec<String> = serde_json::from_value(b["declared_here"].clone()).expect("d");
     assert_eq!(known.len(), 6, "noetl has six known internal object types");
-    assert_eq!(declared, known, "all six were declared through the API");
+    // ⚠ This used to be `assert_eq!(declared, known)`, which passed VACUOUSLY: the
+    // handler looped over the six known names and reported which were present, so
+    // `declared` could not contain anything else no matter what was declared. The
+    // custom `dashboard` type declared a few lines above was invisible — in a test whose
+    // whole point was that a resource type is data.
+    //
+    // Now the listing enumerates the type registry, so assert the property that
+    // actually matters: every known type that was declared is listed, AND the custom
+    // one is too.
+    for k in &known {
+        assert!(
+            declared.contains(k),
+            "declared-here must list the known type {k:?}; got {declared:?}"
+        );
+    }
+    assert!(
+        declared.contains(&"dashboard".to_string()),
+        "a CUSTOM declared type must be listed — this is the generality claim, and the \
+         previous implementation could never satisfy it: {declared:?}"
+    );
+    assert_eq!(
+        declared.len(),
+        known.len() + 1,
+        "six known plus the one custom type, and nothing else: {declared:?}"
+    );
 
     // --- register objects: 9 playbooks + 3 credentials + 2 agents ---
     let playbooks: Vec<String> = (0..9).map(|i| format!("muno/playbooks/pb_{i}")).collect();
@@ -564,10 +588,13 @@ async fn a_constrained_attribute_is_enforced_on_an_explicit_write() {
     )
     .await;
     println!("refused: {st} {body}");
+    // ⚠ This asserted 500. A 500 says "the store broke, retry, page someone"; the
+    // request was simply invalid. The old expectation encoded the defect that every
+    // store error mapped to 500 regardless of whose fault it was.
     assert_eq!(
         st,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "a bad value must not be stored"
+        StatusCode::BAD_REQUEST,
+        "a bad value must not be stored, and must be reported as the CALLER's error"
     );
     let msg = body.as_str().unwrap_or_default();
     // ⚠ The rejection must name the offender AND offer the valid set.
@@ -584,6 +611,16 @@ async fn a_constrained_attribute_is_enforced_on_an_explicit_write() {
     // `#[serde(tag = "type", content = "value", rename_all = "snake_case")]`, so it is
     // `{"type":"text","value":"webhook"}`. Asserting the real wire shape, since this is
     // the shape a client has to parse.
+    // ⚠ The attributes response is now an envelope -- `{path, lang, languages, count,
+    // attributes}` -- rather than a bare map, so that `languages_of` and the
+    // language-scoped read have a caller at all. Both had ZERO callers before. The
+    // attribute map moved under `attributes`.
+    assert_eq!(b["count"], 1, "one attribute survived: {b}");
+    assert!(
+        b["languages"].as_array().is_some(),
+        "the language set is always reported, even when empty: {b}"
+    );
+    let b = &b["attributes"];
     assert_eq!(
         b["spec.source"]["value"]["type"], "text",
         "the typed union must keep its tag on the wire"
@@ -605,7 +642,8 @@ async fn a_constrained_attribute_is_enforced_on_an_explicit_write() {
             ),
         )
         .await;
-        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{bad}: {body}");
+        // ⚠ 400, not 500: a tool kind the platform rejects is the caller's error.
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {body}");
     }
     // A real tool kind is accepted.
     let (st, _) = call(
@@ -741,10 +779,11 @@ async fn ingestion_records_a_value_the_platform_would_reject() {
         ),
     )
     .await;
+    // ⚠ Also asserted 500 before; a rejected tool kind is a bad request.
     assert_eq!(
         st,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "an explicit assertion of a rejected kind must still be refused"
+        StatusCode::BAD_REQUEST,
+        "an explicit assertion of a rejected kind must still be refused, as a 400"
     );
 }
 

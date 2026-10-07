@@ -170,6 +170,21 @@ pub const TYPE_KEY_PREFIX: &str = "\u{1}type/";
 /// without scanning every path in the catalog.
 pub const EDGE_TO_KEY_PREFIX: &str = "\u{1}to/";
 
+/// The **type registry** key — one well-known key under which every declared type name
+/// is indexed, inside the existing `c4` type dataset.
+///
+/// ⚠ Why this is needed at all: every read in this store is an EXACT-key lookup
+/// (`read_index_after` compares the index key with string equality), and the engine
+/// surfaces no full-scan primitive. So a type could be declared, stored, fetched BY
+/// NAME and have objects registered against it, while `GET /api/catalog/types` could
+/// never mention it — that endpoint looped over noetl's six known names and reported
+/// which were present, so a custom type was invisible by construction. That directly
+/// contradicted the catalog's central claim that a resource type is data.
+///
+/// Same shape as the three reverse indexes above: a sentinel key inside an existing
+/// dataset, so there is still no fifth `Dataset` impl (AC3).
+pub const TYPE_REGISTRY_KEY: &str = "\u{1}alltypes";
+
 /// The reverse-edge key for a target path.
 pub fn edge_to_key(to_path: &str) -> String {
     format!("{EDGE_TO_KEY_PREFIX}{to_path}")

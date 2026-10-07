@@ -93,17 +93,28 @@ pub fn router(state: ApiState) -> Router {
             "/api/catalog/objects",
             post(handlers::register_object).get(handlers::list_objects),
         )
-        .route("/api/catalog/objects/{*path}", get(handlers::get_object))
+        .route(
+            "/api/catalog/objects/{*path}",
+            get(handlers::get_object).delete(handlers::archive_object),
+        )
+        // ⚠ NOT `/objects/{*path}/restore`: a catch-all segment swallows everything
+        // after it, and axum refuses the pair outright ("Insertion failed due to
+        // conflict"). A body-carrying sibling is also the shape the platform's own
+        // `POST /api/catalog/restore` already uses.
+        .route("/api/catalog/restore", post(handlers::restore_object))
         // --- attributes ---
         .route("/api/catalog/attributes", post(handlers::set_attribute))
         .route(
             "/api/catalog/attributes/{*path}",
-            get(handlers::get_attributes),
+            get(handlers::get_attributes).delete(handlers::unset_attribute),
         )
         // The reverse attribute lookup — "which objects carry attribute N".
         .route("/api/catalog/by-attribute", get(handlers::by_attribute))
         // --- relations ---
-        .route("/api/catalog/relations", post(handlers::assert_relation))
+        .route(
+            "/api/catalog/relations",
+            post(handlers::assert_relation).delete(handlers::retract_relation),
+        )
         .route(
             "/api/catalog/relations/{*path}",
             get(handlers::relations_from),
