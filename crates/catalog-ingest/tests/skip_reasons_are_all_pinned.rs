@@ -24,6 +24,20 @@ fn label_of(r: &SkipReason) -> &'static str {
     }
 }
 
+/// ⚠⚠ The metrics registry is a **process global**, and `cargo test` does **not**
+/// serialise tests. Any test that increments it perturbs any test that measures it, so
+/// every test in this file that touches the counters takes this lock.
+///
+/// This is not hypothetical and not foresight — it is a failure that reached CI. The
+/// delta-measuring test read `scanned=+6` for a run that scanned **3**, because the
+/// reachability test below ingests concurrently. It passed locally and failed in CI,
+/// which is the ordinary way a race announces itself: local timing hid it.
+///
+/// ⚠ The hazard was already documented in `metrics_pinned_and_moving.rs` — and then
+/// violated by the very next test added, in a different file. A warning in one file does
+/// not protect another.
+static COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn write(root: &std::path::Path, rel: &str, body: &str) {
     let p = root.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).expect("mkdir");
@@ -80,6 +94,8 @@ fn every_skip_reason_arm_is_pinned_and_every_pin_is_reachable() {
 /// cause fails here.
 #[test]
 fn every_pinned_reason_is_reachable_from_a_real_ingestion() {
+    // Held because this ingests, which increments the shared registry.
+    let _guard = COUNTERS.lock().expect("counter lock");
     let dir = tempfile::tempdir().expect("td");
     let src = dir.path().join("src");
     // One document per skip reason, and nothing else.
@@ -120,6 +136,8 @@ fn every_pinned_reason_is_reachable_from_a_real_ingestion() {
 /// between `ingest` and `record_*` is exercised rather than assumed.
 #[test]
 fn a_real_ingestion_moves_the_counters() {
+    // Held because this MEASURES deltas on the shared registry.
+    let _guard = COUNTERS.lock().expect("counter lock");
     metrics::init();
     let dir = tempfile::tempdir().expect("td");
     let src = dir.path().join("src");
