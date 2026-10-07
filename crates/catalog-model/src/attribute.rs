@@ -76,15 +76,69 @@ pub struct Attribute {
     /// e.g. `labels.team`, `exposed_in_ui`.
     pub name: String,
     pub value: AttributeValue,
+    /// **The language this value is written in**, as an ISO code — `None` for a value
+    /// that has no language.
+    ///
+    /// # Why this is a real dimension and not part of the name
+    ///
+    /// **24 of adiona's 58 tables are `_translate` / `_content`** tables. Dropping
+    /// localization would make adiona a false worked example — nearly half its schema
+    /// would be inexpressible, and the reference model would not be the thing the
+    /// catalog is a generalization of.
+    ///
+    /// The alternative, encoding the language into the attribute name
+    /// (`category_name@de`), was measured to "work" and is wrong: the language becomes
+    /// unqueryable, `attributes()` returns one entry per language as if they were
+    /// different attributes, and nothing can ask "which languages is this translated
+    /// into" or fall back to the default.
+    ///
+    /// `None` is **not** the same as `Some("en")`: a playbook's `uses_tool.postgres`
+    /// has no language at all, while an English label is a translation that happens to
+    /// be English. Conflating them would make every noetl attribute pretend to be
+    /// English.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 impl Attribute {
+    /// A **language-neutral** attribute. Every noetl attribute is this: a playbook's
+    /// `uses_tool.postgres` is not written in a language.
     pub fn new(entity_id: i64, name: impl Into<String>, value: AttributeValue) -> Self {
         Self {
             entity_id,
             name: name.into(),
             value,
+            lang: None,
         }
+    }
+
+    /// A **localized** attribute — one translation of a value.
+    ///
+    /// The language code is lowercased, because `lang_code` arrives as `en`/`EN`/`En`
+    /// across adiona's columns and two spellings of one language would be two
+    /// translations. Same reasoning as the kind-casing bug in noetl/server#429.
+    pub fn localized(
+        entity_id: i64,
+        name: impl Into<String>,
+        value: AttributeValue,
+        lang: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            entity_id,
+            name: name.into(),
+            value,
+            lang: Some(lang.as_ref().trim().to_lowercase()),
+        }
+    }
+
+    /// The fold identity of this attribute: `(name, lang)`.
+    ///
+    /// ⚠⚠ **Not just `name`.** `category_name` in `en` and in `de` are two values of
+    /// one attribute, and folding on the name alone makes the second overwrite the
+    /// first — silent data loss, with a successful-looking write. That is the exact
+    /// shape `fold_latest_by`'s doc warns about, one level deeper.
+    pub fn fold_key(&self) -> (String, Option<String>) {
+        (self.name.clone(), self.lang.clone())
     }
 }
 

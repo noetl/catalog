@@ -193,6 +193,12 @@ pub enum AttributeOpKind {
     Set(Box<Attribute>),
     Unset {
         name: String,
+        /// Which translation to remove. `None` unsets the language-neutral value.
+        ///
+        /// ⚠ Required: without it, unsetting `category_name` could only mean "remove
+        /// every language", and removing one translation would be impossible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lang: Option<String>,
     },
     /// A **reverse-index** row: "the attribute named by `index` is live on `path`".
     ///
@@ -227,12 +233,31 @@ impl AttributeOpKind {
     pub fn name(&self) -> &str {
         match self {
             Self::Set(a) => &a.name,
-            Self::Unset { name } => name,
+            Self::Unset { name, .. } => name,
             // The reverse row's name lives in its key, after the sentinel.
             Self::Reverse { index, .. } => index
                 .strip_prefix(REVERSE_KEY_PREFIX)
                 .unwrap_or(index.as_str()),
         }
+    }
+
+    /// The language this op concerns, if any.
+    pub fn lang(&self) -> Option<&str> {
+        match self {
+            Self::Set(a) => a.lang.as_deref(),
+            Self::Unset { lang, .. } => lang.as_deref(),
+            Self::Reverse { .. } => None,
+        }
+    }
+
+    /// The fold identity: `(name, lang)`.
+    ///
+    /// ⚠⚠ **Not just the name.** `category_name` in `en` and `de` are two values of one
+    /// attribute; folding on the name alone makes the second silently overwrite the
+    /// first. Measured before this was keyed correctly: **1 translation where 3 were
+    /// written**.
+    pub fn fold_key(&self) -> (String, Option<String>) {
+        (self.name().to_string(), self.lang().map(str::to_string))
     }
 
     /// Whether this is a reverse-index row.
