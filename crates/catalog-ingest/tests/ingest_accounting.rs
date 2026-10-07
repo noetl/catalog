@@ -72,8 +72,11 @@ fn every_scanned_file_is_either_registered_or_skipped_with_a_reason() {
         res.scanned, 6,
         "the walker must see exactly the 6 yaml files"
     );
-    assert_eq!(res.registered, 2);
-    assert_eq!(res.skipped.len(), 4);
+    // ⚠ 3, not 2: the `kind: Dashboard` document now REGISTERS. That is the allowlist
+    // removal working — a non-noetl type is catalogued with no code change, and is
+    // reported in `new_types` rather than silently accepted or silently skipped.
+    assert_eq!(res.registered, 3);
+    assert_eq!(res.skipped.len(), 3);
     assert!(
         res.accounts_for_every_file(),
         "scanned {} != registered {} + skipped {}",
@@ -83,7 +86,7 @@ fn every_scanned_file_is_either_registered_or_skipped_with_a_reason() {
     );
 
     // Each reason actually occurred — a test that only counts skips would pass if all
-    // four collapsed into one arm.
+    // three collapsed into one arm.
     // Keyed by arm name rather than `mem::discriminant`, which is not `Ord`.
     let reasons: std::collections::BTreeSet<&str> = res
         .skipped
@@ -92,15 +95,17 @@ fn every_scanned_file_is_either_registered_or_skipped_with_a_reason() {
             SkipReason::Unparseable(_) => "unparseable",
             SkipReason::NoMetadataPath => "no_metadata_path",
             SkipReason::NoKind => "no_kind",
-            SkipReason::UnknownKind(_) => "unknown_kind",
         })
         .collect();
     println!("skip arms exercised: {reasons:?}");
-    assert_eq!(reasons.len(), 4, "all four skip arms must be exercised");
-    assert!(res
-        .skipped
-        .iter()
-        .any(|(_, r)| matches!(r, SkipReason::UnknownKind(k) if k == "Dashboard")));
+    assert_eq!(reasons.len(), 3, "all three skip arms must be exercised");
+    // ⚠ The `Dashboard` document is now REGISTERED, not skipped: removing the allowlist
+    // is the point. A non-noetl type is catalogued and reported in `new_types`.
+    assert!(
+        res.new_types.contains("dashboard"),
+        "an unknown type must be reported, not silently accepted: {:?}",
+        res.new_types
+    );
     assert!(res
         .skipped
         .iter()
@@ -108,8 +113,17 @@ fn every_scanned_file_is_either_registered_or_skipped_with_a_reason() {
     assert!(res.skipped.iter().any(|(_, r)| *r == SkipReason::NoKind));
 
     assert_eq!(res.by_kind.get("playbook"), Some(&2));
-    // 2 registrations x (uses_tool.postgres + uses_credential.adiona_actor).
-    assert_eq!(res.attributes, 4, "the two playbook facts, per document");
+    assert_eq!(
+        res.by_kind.get("dashboard"),
+        Some(&1),
+        "the non-noetl type registered"
+    );
+    // 2 playbooks x (uses_tool.postgres + uses_credential.adiona_actor). The dashboard
+    // document has no workflow, so it contributes no playbook facts.
+    assert_eq!(
+        res.attributes, 4,
+        "the two playbook facts, per playbook document"
+    );
 
     // And the data is readable back through the fold, not merely appended.
     let v = store.versions("adiona/v1/catalog_list").expect("versions");

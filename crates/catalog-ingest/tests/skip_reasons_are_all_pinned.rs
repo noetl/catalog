@@ -21,7 +21,6 @@ fn label_of(r: &SkipReason) -> &'static str {
         SkipReason::Unparseable(_) => "unparseable",
         SkipReason::NoKind => "no_kind",
         SkipReason::NoMetadataPath => "no_metadata_path",
-        SkipReason::UnknownKind(_) => "unknown_kind",
     }
 }
 
@@ -40,7 +39,6 @@ fn every_skip_reason_arm_is_pinned_and_every_pin_is_reachable() {
         SkipReason::Unparseable("x".into()),
         SkipReason::NoKind,
         SkipReason::NoMetadataPath,
-        SkipReason::UnknownKind("Dashboard".into()),
     ];
     println!(
         "SkipReason arms: {}   pinned labels: {}",
@@ -63,8 +61,7 @@ fn every_skip_reason_arm_is_pinned_and_every_pin_is_reachable() {
         );
     }
 
-    // Direction 2: every pinned label is produced by some arm — a pin nothing can reach
-    // is an inert series that reads 0 forever and looks healthy.
+    // Direction 2: every pinned label is produced by some arm.
     let produced: Vec<&str> = all.iter().map(label_of).collect();
     for l in metrics::SKIP_REASONS {
         assert!(
@@ -72,6 +69,51 @@ fn every_skip_reason_arm_is_pinned_and_every_pin_is_reachable() {
             "pinned label {l:?} is produced by no SkipReason arm — it would read 0 forever"
         );
     }
+}
+
+/// ⚠⚠ Direction 2 above checks the arm EXISTS, not that `ingest` can PRODUCE it — which
+/// is existence-vs-reachability inside my own guard. It passed while
+/// `SkipReason::UnknownKind` had become unconstructible after the allowlist was removed:
+/// a hand-built list of arms proves nothing about the code path.
+///
+/// This drives a real ingestion that triggers every reason, so a reason no document can
+/// cause fails here.
+#[test]
+fn every_pinned_reason_is_reachable_from_a_real_ingestion() {
+    let dir = tempfile::tempdir().expect("td");
+    let src = dir.path().join("src");
+    // One document per skip reason, and nothing else.
+    write(
+        &src,
+        "pb/unparseable.yaml",
+        "kind: Playbook\n  bad: [unclosed\n",
+    );
+    write(&src, "pb/no_kind.yaml", "metadata:\n  path: a/b\n");
+    write(
+        &src,
+        "pb/no_path.yaml",
+        "kind: Playbook\nmetadata:\n  name: x\n",
+    );
+
+    let mut store = CatalogStore::open(&StoreConfig::new(dir.path().join("store"))).expect("open");
+    let res = ingest(&mut store, &Source::Dir(src), "pb", 1).expect("ingest");
+    println!("{}", res.summary());
+
+    let produced: std::collections::BTreeSet<&str> =
+        res.skipped.iter().map(|(_, r)| label_of(r)).collect();
+    println!("reasons a real ingestion produced: {produced:?}");
+    assert_eq!(
+        res.scanned, 3,
+        "the fixture must contain exactly one document per reason"
+    );
+    for l in metrics::SKIP_REASONS {
+        assert!(
+            produced.contains(&l),
+            "pinned reason {l:?} cannot be produced by ANY document — it is an inert \
+             series that will read 0 forever"
+        );
+    }
+    assert_eq!(produced.len(), metrics::SKIP_REASONS.len());
 }
 
 /// An end-to-end check that a real ingestion moves the real counters, so the wiring

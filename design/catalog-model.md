@@ -118,11 +118,83 @@ repo.
 
 ---
 
+## 2.9 Scope, stated plainly — corrected 2026-10-06
+
+> **This is a generic catalog for noetl's own internal object types, with NO SQL
+> surface of any kind, reachable only through the catalog API.**
+
+Three clarifications that override earlier drafts:
+
+1. **adiona is inspiration, not content.** Its relational / EAV patterns shaped the
+   model (§3). Its *schema* is **not** mapped in, there is **no DDL parser**, and the
+   acceptance proof is **not** an adiona slice. An earlier draft of this spec drifted
+   toward making adiona the worked example; the generality that matters is over
+   **noetl's own object types**, measured in §2.10.
+2. **API-only, no SQL.** The catalog has no SQL surface: no DDL parser, no SQL query
+   interface, no SQL-shaped access layer, and no query language standing in for one.
+   Declaring a type, writing objects / attributes / relations, and every read —
+   including the reverse lookups and the relation graph — happen through the catalog
+   API over the EHDB-backed store. **AC1** enforces the storage half mechanically (no
+   DB driver in any manifest, no SQL literal in any non-test source, denominator
+   printed).
+3. **Localization is not a noetl requirement.** The `lang` dimension landed while the
+   scope still included adiona's 24 `_translate` tables. It is **inert for noetl
+   objects** — `lang` defaults to `None` and the neutral read excludes translations, so
+   noetl behaviour is byte-identical — and it is **not built on further**. ⚠ Flagged,
+   not built: no concrete noetl need for localization was found while enumerating the
+   object types. If one appears, it has a mechanism waiting; it is not a reason to add
+   one.
+
+## 2.10 noetl's internal object types — discovered, not invented
+
+The authority is `noetl.resource` in `repos/server/db/ddl/postgres/schema_ddl.sql`,
+which seeds five rows and is the **FK target of `noetl.catalog.kind`**:
+
+| type | `executable` | `catalog` | description (noetl's own words) |
+| :-- | :-- | :-- | :-- |
+| `playbook` | true | true | Executable NoETL workflow definition |
+| `credential` | false | true | Credential or secret reference metadata |
+| `mcp` | false | true | Model Context Protocol server/tool provider |
+| `agent` | true | true | Agent-as-playbook or agent capability resource |
+| `memory` | false | true | AI memory, knowledge, or coordination artifact |
+| `subscription` | true | true | ⚠ see below — **not** seeded in `noetl.resource` |
+
+Those `executable` / `catalog` flags map onto `ResourceType`'s `executable` /
+`catalogued` exactly, which is why those two fields exist.
+
+⚠ **`subscription` is the sixth and its status is inconsistent upstream.**
+`noetl/server` validates `kind: Subscription` as "a first-class catalog type" and the
+travel repo registers such documents — but `subscription` has **no row in
+`noetl.resource`**, so there is nothing for `noetl.catalog.kind`'s foreign key to
+reference. Reported to noetl/server rather than papered over here.
+
+⚠⚠ **A resource type is not a tool kind.** `ToolKind` has **25** variants (`Http`,
+`Postgres`, `Python`, `Playbook`, `Wasm`, …) governing `tool.kind` *inside a step*, and
+`agent` / `mcp` / `provider` / `result_fetch` are **rejected** as tool kinds
+(noetl/ai-meta#256) while `agent` and `mcp` are perfectly good *resource types*.
+Conflating the two would make the catalog refuse two of noetl's own object types.
+
+### There is no allowlist
+
+`catalog-ingest` previously gated on `matches!(type_name, "playbook" | "subscription")`
+— so **four of noetl's own six types were rejected** as `UnknownKind`, and a seventh
+would have needed a code change to be catalogued at all. Every kind is now accepted.
+What replaced the gate is **reporting**: a type the run has never seen lands in
+`Ingested::new_types` and is printed, so nothing is silently dropped and nothing is
+silently invented — a typo becomes a visible new type rather than an invisible skip.
+
+⚠ `SkipReason::UnknownKind` and its pinned metric label were **deleted**, not kept
+"for later": with every kind accepted nothing could produce them, and an unreachable
+skip reason is an inert series that reads 0 forever and looks healthy.
+
+---
+
 ## 3. The reference model, and the one thing to change about it
 
-The relational patterns are informed by the
+⚠ **Inspiration only** — see §2.9. The relational patterns are informed by the
 [adiona data model](https://github.com/adiona/adiona-datamodel/tree/master/mysqldb).
-Read for structure, not for schema. Its relevant core:
+Read for structure, not for schema; its tables are not mapped into this model and its
+schema is not an acceptance target. Its relevant core:
 
 | adiona table | pattern |
 | :-- | :-- |

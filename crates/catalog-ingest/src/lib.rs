@@ -49,8 +49,11 @@ pub enum SkipReason {
     NoMetadataPath,
     /// Parsed, but no top-level `kind:`, so its resource type is unknown.
     NoKind,
-    /// A `kind:` this catalog has no resource type for.
-    UnknownKind(String),
+    // ⚠ There is deliberately NO `UnknownKind` arm any more. Removing the allowlist
+    // made it unreachable — nothing can construct it — and an unreachable skip reason
+    // is an inert series that reads 0 forever and looks healthy, which is the exact
+    // shape `metrics::SKIP_REASONS`'s reachability check exists to forbid. Keeping it
+    // "for later" would be the inert-mechanism pattern this codebase keeps finding.
 }
 
 impl std::fmt::Display for SkipReason {
@@ -59,7 +62,6 @@ impl std::fmt::Display for SkipReason {
             Self::Unparseable(e) => write!(f, "unparseable: {e}"),
             Self::NoMetadataPath => write!(f, "no metadata.path"),
             Self::NoKind => write!(f, "no top-level kind:"),
-            Self::UnknownKind(k) => write!(f, "unknown kind: {k}"),
         }
     }
 }
@@ -79,6 +81,14 @@ pub struct Ingested {
     pub skipped: Vec<(PathBuf, SkipReason)>,
     /// Registered count per `kind`, so a run says *what* it catalogued.
     pub by_kind: BTreeMap<String, usize>,
+    /// Types this run catalogued that are **not** among noetl's six known internal
+    /// object types.
+    ///
+    /// ⚠ This is what replaced the allowlist. Accepting every kind is required for a
+    /// generic catalog, but accepting silently would let a typo invent a type. A run
+    /// prints these, so the operator sees `dashbaord` and fixes it — the same
+    /// print-the-denominator discipline as `scanned`.
+    pub new_types: std::collections::BTreeSet<String>,
 }
 
 impl Ingested {
@@ -92,7 +102,7 @@ impl Ingested {
 
     /// A one-line summary that always prints the denominator.
     pub fn summary(&self) -> String {
-        format!(
+        let mut out = format!(
             "scanned={} registered={} skipped={} relations={} attributes={} kinds={:?}",
             self.scanned,
             self.registered,
@@ -100,7 +110,14 @@ impl Ingested {
             self.relations,
             self.attributes,
             self.by_kind
-        )
+        );
+        if !self.new_types.is_empty() {
+            out.push_str(&format!(
+                " ⚠ types not among noetl's six known: {:?}",
+                self.new_types
+            ));
+        }
+        out
     }
 }
 
@@ -247,12 +264,20 @@ pub fn ingest(
         // bug where `kind = $1` compared a mixed-case column to a lowercase parameter
         // and returned 650 rows where 1,525 existed.
         let type_name = kind.to_lowercase();
-        if !matches!(type_name.as_str(), "playbook" | "subscription") {
-            result
-                .skipped
-                .push((doc.origin, SkipReason::UnknownKind(kind)));
-            catalog_store::metrics::record_skip("unknown_kind");
-            continue;
+
+        // ⚠⚠ THERE IS NO ALLOWLIST. A catalog that admits only a hard-coded set of
+        // types is not a generic catalog, and this was `matches!(type_name,
+        // "playbook" | "subscription")` — so four of noetl's OWN six internal object
+        // types (`credential`, `mcp`, `agent`, `memory`, all seeded in
+        // `noetl.resource`) were rejected as `UnknownKind`, and a seventh type would
+        // have needed a code change to be catalogued at all.
+        //
+        // Every kind is now accepted. What replaces the gate is REPORTING: a type the
+        // run has never seen is recorded in `new_types` and printed, so nothing is
+        // silently dropped AND nothing is silently invented. A typo becomes a visible
+        // new type rather than an invisible skip.
+        if !catalog_model::is_known_noetl_type(&type_name) {
+            result.new_types.insert(type_name.clone());
         }
         let path = match parsed
             .get("metadata")
@@ -285,8 +310,17 @@ pub fn ingest(
         // subscription are executable. Idempotent — declaring is an append whose fold
         // is latest-op-wins, and re-declaring the same shape is a no-op in effect.
         if !result.by_kind.contains_key(&type_name) {
+            // ⚠ The flags come from noetl's own `noetl.resource` seed where the type is
+            // one of its six, and default to executable+catalogued otherwise. Guessing
+            // `executable: true` for `credential` would be wrong — noetl declares it
+            // `executable:false`, and the catalog should not contradict the platform
+            // about what can be executed.
+            let declared = catalog_model::noetl_resource_types()
+                .into_iter()
+                .find(|t| t.name == type_name)
+                .unwrap_or_else(|| catalog_model::ResourceType::new(&type_name, true, true));
             store
-                .declare_type(catalog_model::ResourceType::new(&type_name, true, true))
+                .declare_type(declared)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
 
