@@ -766,6 +766,11 @@ impl CatalogStore {
         reclaimed += self.relations.reclaim_orphans()?;
         reclaimed += self.types.reclaim_orphans()?;
 
+        // ⚠ Recorded here, not left to the caller. The counters existed as return
+        // values and nothing recorded them — the reachability-vs-existence shape
+        // again, one level up from the lifecycle calls this function drives.
+        crate::metrics::record_tick(sealed, merged, reclaimed);
+
         Ok(Ticked {
             sealed,
             merged,

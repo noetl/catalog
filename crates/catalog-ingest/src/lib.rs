@@ -230,6 +230,7 @@ pub fn ingest(
                 result
                     .skipped
                     .push((doc.origin, SkipReason::Unparseable(e.to_string())));
+                catalog_store::metrics::record_skip("unparseable");
                 continue;
             }
         };
@@ -237,6 +238,7 @@ pub fn ingest(
             Some(k) => k.to_string(),
             None => {
                 result.skipped.push((doc.origin, SkipReason::NoKind));
+                catalog_store::metrics::record_skip("no_kind");
                 continue;
             }
         };
@@ -249,6 +251,7 @@ pub fn ingest(
             result
                 .skipped
                 .push((doc.origin, SkipReason::UnknownKind(kind)));
+            catalog_store::metrics::record_skip("unknown_kind");
             continue;
         }
         let path = match parsed
@@ -261,6 +264,7 @@ pub fn ingest(
                 result
                     .skipped
                     .push((doc.origin, SkipReason::NoMetadataPath));
+                catalog_store::metrics::record_skip("no_metadata_path");
                 continue;
             }
         };
@@ -303,6 +307,8 @@ pub fn ingest(
         result.attributes += reg.attributes;
         *result.by_kind.entry(type_name).or_insert(0) += 1;
     }
+    // The denominator first: `scanned` is what makes `registered` interpretable.
+    catalog_store::metrics::record_ingest(result.scanned, result.registered, result.skipped.len());
     Ok(result)
 }
 

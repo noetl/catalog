@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod datasets;
+pub mod metrics;
 pub mod store;
 
 pub use datasets::{

@@ -31,6 +31,7 @@ USAGE:
   catalog show   --store <dir> --path <catalog/path>
   catalog who-uses --store <dir> --attr <attribute.name>
   catalog who-calls --store <dir> --path <catalog/path>
+  catalog metrics  [--store <dir>]
 
 NOTES:
   --source git:REPO@REF reads the REF, not the working tree. Prefer it: a stale
@@ -263,6 +264,32 @@ fn run(args: &[String]) -> Result<(), String> {
                      and an un-ingested store look identical."
                 );
             }
+            Ok(())
+        }
+        // Prometheus text format. No HTTP server: this binary is a CLI, and a scrape
+        // target would be a deployment decision nobody has asked for yet.
+        "metrics" => {
+            catalog_store::metrics::init();
+            // A --store is optional, but if given, report its part counts too so a
+            // scrape and an operator see the same numbers.
+            if has(args, "--store") {
+                let store = open_store(args)?;
+                let pc = store.part_counts();
+                println!(
+                    "# parts entities={} attributes={} relations={} types={}",
+                    pc.entities, pc.attributes, pc.relations, pc.types
+                );
+            }
+            print!("{}", catalog_store::metrics::render());
+            // ⚠ Say this, because otherwise every invocation reports zeros and a reader
+            // has no way to tell "nothing happened" from "nothing could have happened".
+            // The counters live in the process; this CLI exits immediately, so a
+            // standalone `metrics` call is always all-zero BY CONSTRUCTION. They are
+            // meaningful inside one long-running process, or in the same invocation as
+            // the work (`ingest --tick` prints its own numbers).
+            println!(
+                "# NOTE: these counters are per-process. This CLI exits immediately, so a\n                 # standalone `catalog metrics` is all-zero by construction — not a\n                 # measurement. Read them from a long-running process, or read the numbers\n                 # `ingest`/`tick` print in the same invocation as the work."
+            );
             Ok(())
         }
         "show" => {
