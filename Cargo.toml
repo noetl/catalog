@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/catalog-api",
   "crates/catalog-extract",
   "crates/catalog-ingest",
   "crates/catalog-model",
@@ -33,6 +34,7 @@ ehdb-core = { git = "https://github.com/noetl/ehdb", tag = "v0.4.5" }
 catalog-extract = { path = "crates/catalog-extract" }
 catalog-model = { path = "crates/catalog-model" }
 catalog-store = { path = "crates/catalog-store" }
+catalog-ingest = { path = "crates/catalog-ingest" }
 
 # The playbook source is YAML. 0.9 is what noetl/server parses registration with, so
 # the extractor and the registrar agree about what a document means — a second YAML
