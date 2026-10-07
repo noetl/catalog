@@ -10,51 +10,109 @@ playbooks first — persisted through [EHDB](https://github.com/noetl/ehdb).
 
 ## What this is
 
-NoETL registers a growing set of internal resources — playbooks, and the other
-asset types the platform references by name and version. Today they live in a
-single `noetl.catalog` table whose shape is specific to what was needed at the
-time. This repository holds the **generalized model** that replaces that shape:
-one entity/relation model in which adding a new resource type is **data, not a
-schema migration**.
+A **generic catalog for noetl's own internal object types**, stored in EHDB and reachable
+**only through its API**.
+
+* **Generic** — nothing in the store knows what a "playbook" is. An object is
+  `(resource_type, path, version)`; attributes and relations reference that identity.
+  Adding an object type writes **rows, never schema**, and needs **no code change**.
+* **noetl's own objects** — the scope is the six types noetl itself declares, discovered
+  from `noetl.resource` rather than invented: `playbook`, `credential`, `mcp`, `agent`,
+  `memory`, and `subscription`. See `design/catalog-model.md` §2.10.
+* **API-only** — `/api/catalog/*` is the entire interface.
 
 ## What this is *not*
 
-**It is not a datastore.** EHDB is the database. The catalog is the model and API
-layer on top of it:
+**It is not a datastore.** EHDB is the database. The catalog is the model and API layer
+over it.
 
-- a catalog write becomes an **EHDB event** on the chain;
-- every catalog read is served from an **EHDB-derived projection**;
-- there is no second database, no engine of our own, and no external datastore.
+**It has no SQL surface of any kind.** No DDL parser, no SQL query interface, no
+SQL-shaped access layer, and no query language standing in for one. This is enforced
+mechanically: `ac1_the_crate_runs_no_sql_and_links_no_database_driver` asserts that no
+manifest links a database driver and no non-test source contains a SQL literal, and it
+prints the population it scanned.
 
-This follows `noetl/ai-meta`'s self-sufficiency rule: *self-sufficient means
-NoETL owns its own state — it does not mean no dependencies.* Proven libraries
-are welcome; a separate thing to deploy, size, quorum and recover is not.
+**It is not an Adiona port.** See below.
 
-The boundary is load-bearing, not stylistic. A catalog owning its own storage
-would be a second source of truth for facts the event log already holds, and the
-two would disagree. That is the failure NoETL has paid for most often; see
-`agents/rules/representation-drift.md` in `noetl/ai-meta`.
+## The API
+
+```
+GET  /api/catalog/health
+POST /api/catalog/types                  declare an object type       (auth)
+GET  /api/catalog/types                  known noetl types + declared-here
+GET  /api/catalog/types/{name}
+POST /api/catalog/objects                register an object           (auth)
+GET  /api/catalog/objects?type=X         query by type
+GET  /api/catalog/objects/{*path}        latest + every version
+POST /api/catalog/attributes             set an attribute             (auth)
+GET  /api/catalog/attributes/{*path}
+GET  /api/catalog/by-attribute?name=N    query by attribute   (reverse)
+POST /api/catalog/relations              assert an edge               (auth)
+GET  /api/catalog/relations/{*path}      query by relation
+GET  /api/catalog/relations-to/{*path}   query by reverse relation
+POST /api/catalog/tick                   EHDB lifecycle               (auth)
+GET  /metrics
+```
+
+Writes and the lifecycle tick require the internal bearer token, mirroring
+`noetl/server`'s `/api/internal/*` guard: **503** when the token is unconfigured (a
+privileged surface gets no permissive default) and **403** on a missing, malformed or
+mismatched header. Reads are open — the catalog's inventory is the platform's own object
+list, and it is the *mutation* that is privileged.
+
+⚠ **Every read returns the full set with its count, never a page.** A paginated default
+is how a partial answer passes for a complete one. The folds behind these endpoints
+returned `1 of 49`, `0 of 48`, `1 of 53` and `1 of 40` before they were keyed correctly —
+answers that looked successful. The `0 of 48` reported *"nobody uses this credential"*
+while 48 objects did.
+
+## Four datasets, and that number does not move
+
+`c1` entities · `c2` relations · `c3` attributes · `c4` types. **AC3 asserts the
+`Dataset` impl count is exactly four**, and it is the invariant the whole design rests on:
+adding an object type must not add storage shape.
+
+Three *reverse* indexes exist and none of them added a dataset. Each lives **inside** an
+existing dataset as a second row kind, keyed by a control-character sentinel, which works
+because `ehdb-l0` matches the index key by exact string equality:
+
+| dataset | forward key | synthetic key | answers |
+| :-- | :-- | :-- | :-- |
+| `c1` | `path` | `\u{1}type/<kind>` | every object of type X |
+| `c2` | `from_path` | `\u{1}to/<path>` | **what references X** |
+| `c3` | `path` | `\u{1}attr/<name>` | which objects carry attribute N |
+
+The sentinel is a control character because a synthetic key must be impossible to collide
+with a real `metadata.path`; a forward write whose path intrudes is **refused**.
 
 ## Reference, not template
 
-The relational patterns are informed by the
-[adiona data model](https://github.com/adiona/adiona-datamodel/tree/master/mysqldb)
-— specifically its entity/attribute/value core and its typed, self-referencing
-taxonomy. It is a **reference for *what* a flexible catalog needs**, not a schema
-to port. Its own extensibility stops short of the goal here: it needs a new
-table per entity type (`item_attributes`, `trip_attributes`, `trip_category`), so
-adding a type means DDL. The model in this repo replaces that with one
-polymorphic identity, which is also what maps cleanly onto an event-sourced
-store where every "table" is a projection.
+The relational and EAV patterns are informed by the
+[adiona data model](https://github.com/adiona/adiona-datamodel/tree/master/mysqldb) —
+**inspiration only**. Its schema is **not** mapped in, its tables are not catalog entities,
+and the acceptance proof is not an adiona slice.
 
-See the spec for the mapping in full.
+What was taken: the one-polymorphic-identity fix for adiona's "a new table per entity
+type" flaw, the EAV collapse, the self-referencing taxonomy (`supertype`), and the typed
+value union its stored procedures reveal.
+
+### Consciously dropped
+
+| dropped | why |
+| :-- | :-- |
+| a SQL **DDL parser** (`catalog-schema`) | out of scope — the catalog has no SQL surface, and parsing a foreign schema is not what a catalog of noetl's own objects needs |
+| the **adiona round-trip** acceptance proof | the generality that matters is over noetl's own object types; acceptance is set-equality over those |
+| **localization as a worked feature** | it was driven by adiona's 24 `_translate` tables. The `lang` dimension exists and is **inert for noetl objects** (defaults to `None`; the neutral read excludes translations), and is not built on further. No concrete noetl need was found — flagged, not built |
 
 ## Layout
 
 ```
-crates/catalog-model/   the entity/relation model
-design/                 design specification and decision records
-.github/workflows/ci.yml  fmt + source hygiene + tests + clippy -D warnings
+crates/catalog-model/    the object/attribute/relation model, and noetl's six types
+crates/catalog-store/    the four EHDB datasets, the folds, the three reverse indexes
+crates/catalog-extract/  reads a document for the references and facts it declares
+crates/catalog-ingest/   walks a source (a dir, or a git ref) and registers what it finds
+crates/catalog-api/      /api/catalog/* — the only interface
+design/catalog-model.md  the design spec
 ```
 
 ## Development
