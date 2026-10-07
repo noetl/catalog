@@ -626,6 +626,29 @@ Checkable, per `agents/rules/spec-driven-development.md`.
 fail loudly. These two would otherwise pass while being broken, which is why each
 specifies a positive control.
 
+### Status, as audited in code
+
+**9 of 10 cited, 1 deliberately open, 0 broken citations.** The citations are not in
+this table — a ticked box here is a copy of reality, true only while someone keeps it
+true, and this repo has three recorded instances of shipped work with unticked boxes
+(#194 T0–T5, ehdb#241 phases 6–10, #201). So each criterion names a test function in
+`crates/catalog-store/tests/spec_acceptance_traceability.rs`, and the audit asserts
+the function **exists in the file it claims**. A citation to a renamed or deleted test
+fails there rather than rotting into a confident tick — proven by mutation: renaming
+one cited test and pointing another at a missing file produced `2 broken citations`.
+
+⚠⚠ **AC10 is NOT met**, and is recorded as `Open` with its reason rather than ticked.
+It requires the real `noetl-server`, and nothing in `noetl/server` links
+`catalog-store` — the crate has **no consumer on any serving path**. Discharging it
+means a server integration, which is a separate change with its own owner gate. The
+audit prints this every run and deliberately does **not** fail on it: a check that
+fails on a known gap gets disabled, and one that prints it keeps it visible.
+
+⚠ **AC8 was covered but untraceable.** A sweep for `AC8` across the crate found
+**zero** mentions, while the behaviour and its test already existed (the `c1` type
+index lowercases its key). Covered-but-uncited is how a criterion quietly loses its
+proof, which is the gap the audit closed.
+
 ---
 
 ## 12. Assumptions made without the user
