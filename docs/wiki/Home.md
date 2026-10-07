@@ -124,6 +124,100 @@ count is 0; when P2 lands the four `c1..c4` datasets it becomes exactly 4 and mu
 dataset, the model has regressed to the per-type-table shape this repo exists to
 remove.
 
+## Reads: the three indexes, and why none of them is a fifth dataset
+
+`ehdb-l0`'s `Dataset::index_key` returns **one** `&str`, so one dataset indexes one
+dimension. Three queries needed a second dimension, and AC3 forbids adding a dataset to
+get it. The resolution: a **second row kind inside the existing dataset**, keyed by a
+control-character sentinel. Sound because `read_index_after` matches the index key by
+**exact string equality** (`ehdb-l0` `engine.rs:1489`), so the two key spaces are
+disjoint.
+
+| dataset | forward key | synthetic key | reverse query |
+| :-- | :-- | :-- | :-- |
+| `c1` | `path` | `\u{1}type/<kind>` | `resources_of_type` — every resource of type X |
+| `c2` | `from_path` | `\u{1}to/<path>` | `relations_to` — **who calls X** |
+| `c3` | `path` | `\u{1}attr/<name>` | `resources_with_attribute` — who uses credential X |
+
+The sentinel is a control character because a reverse key must be impossible to collide
+with a real `metadata.path`: a path reading `attr/uses_tool.postgres` would otherwise
+silently answer a reverse query. A forward write whose path intrudes is **refused** —
+the path comes from a document, so it is untrusted input, not a programming mistake.
+
+### ⚠⚠ Every one of these REDs was a partial answer, never an empty one
+
+Many paths share one synthetic key, which makes these the datasets' worst case for the
+`.last()` idiom. Measured, with `.last()` planted:
+
+| query | reading | truth |
+| :-- | --: | --: |
+| who uses `uses_credential.adiona_actor` | **1** | 49 |
+| …after one resource unsets it | **0** | 48 |
+| every `playbook` | **1** | 53 |
+| who calls `shared/dep` | **1** | 40 |
+
+The second row is the one to remember: once any resource unsets the attribute, the
+latest op under the shared key is a **tombstone**, so `.last()` reports *"nobody uses
+this credential"* while 48 do. That reading would green-light a rotation that breaks all
+48. An empty answer gets investigated; a plausible list of 1 gets acted on.
+
+So every assertion in these tests is **set equality**, never a count — a count of 49 can
+still be the wrong 49 — and all of them are checked against ground truth derived
+independently from git.
+
+### Tombstones are required, not an optimisation
+
+Each reverse row carries a `live` flag. Without it an unset/retract/archive would leave
+the resource in the reverse answer forever and the index would only grow. For
+`relations_to` the consequence inverts and gets worse: a caller list that only grows
+argues **against** deleting something that is in fact unused.
+
+### ⚠ `partition()` is derived from `index_key()`, never from the path
+
+They are halves of one contract — a reader picks the shard with `read_partition(key)`
+then matches `index_key` inside it. A row partitioned by one value and indexed by another
+sends the reader to the **wrong shard**, which returns *nothing* rather than erroring.
+
+### ⚠ Synthetic rows are excluded from a forward fold's INPUT, not its output
+
+A reverse attribute row's `name()` equals a real attribute name and would **shadow** it —
+a wrong value, not a missing one. Type rows carry `version: 0` and would create a phantom
+version. Dropping them before the fold makes the worst case a missing reverse row.
+
+## Observability
+
+`catalog_tick_total{outcome}`, `catalog_ingest_total{outcome}`,
+`catalog_ingest_skipped_total{reason}`, `catalog_build_info{version}` — 11 series,
+rendered by `catalog metrics`.
+
+⚠⚠ **Every closed label set is pinned at 0, unconditionally.** `Registry::gather` prunes
+metric families with no children, so a labelled metric is absent from a scrape until
+something increments it — registering is not enough. With the pins removed the whole
+scrape is **155 bytes containing only `build_info`**, which is the shape in which the
+prod gateway once served a 200 with zero bytes.
+
+The pinning is not inside a config branch: `noetl/server#315` pinned its publish-skip
+reasons behind `if event_bus_mode.publishes_ehdb()`, leaving them absent on exactly the
+configuration whose reason someone would be reading.
+
+⚠ The counters are **per-process**, and the CLI exits immediately — so a standalone
+`catalog metrics` is all-zero *by construction*, not a measurement. The subcommand says
+so, because otherwise a reader cannot tell "nothing happened" from "nothing could have
+happened".
+
+## Acceptance criteria: 9 cited, 1 open, audited in code
+
+The spec's AC table is not the authority — a ticked box is a copy of reality. Each
+criterion names a test function in `tests/spec_acceptance_traceability.rs`, and the audit
+asserts the function **exists in the file it claims**, so a renamed or deleted test fails
+loudly instead of rotting into a tick.
+
+⚠⚠ **AC10 is not met**: the existing `/api/catalog` wire shapes cannot be exercised from
+here, because nothing in `noetl/server` links `catalog-store` — the crate has **no
+consumer on any serving path**. It is recorded as `Open` with that reason, and the audit
+prints it every run rather than failing, because a check that fails on a known gap gets
+disabled.
+
 ## Guards, and what each exists to prevent
 
 A guard whose purpose is unrecorded is a guard someone deletes as noise.
