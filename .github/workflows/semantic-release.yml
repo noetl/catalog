@@ -1,0 +1,48 @@
+name: "Semantic Release ⚙️"
+
+# semantic-release owns the version. Never hand-edit Cargo.toml's version and never push
+# a release tag by hand — `agents/rules/release-versioning.md` in noetl/ai-meta records
+# the regression that produced.
+#
+# ⚠ `chore:` and `docs:` release NOTHING, silently. A change that must reach a cluster
+# needs `fix:` or `feat:`.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: cycjimmy/semantic-release-action@v4
+        id: semantic
+        with:
+          extra_plugins: |
+            @semantic-release/changelog
+            @semantic-release/git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ⚠ Report whether a version was actually produced. A run that chose NO release is
+      # green and silent, and `chore:`-only merges therefore look released when nothing
+      # was tagged — the trap named in release-versioning.md.
+      - name: Say whether anything was released
+        run: |
+          if [ "${{ steps.semantic.outputs.new_release_published }}" = "true" ]; then
+            echo "released ${{ steps.semantic.outputs.new_release_version }}"
+          else
+            echo "NO release was produced from these commits — the image was NOT rebuilt."
+            echo "If this change needs to reach a cluster, it needs a fix:/feat: subject."
+          fi

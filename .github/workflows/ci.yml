@@ -65,3 +65,83 @@ jobs:
       # point of having it.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ⚠ The image build is a GATE, not a release-time surprise.
+  #
+  # Before this job the crate had no Dockerfile at all, so "it runs nowhere" was invisible
+  # to a green CI. Building on every PR means a Dockerfile that cannot build fails here
+  # rather than at tag time, when the fix costs a release cycle.
+  #
+  # Nothing is pushed: `push: false` and `load: true`, so this proves the build AND runs
+  # the resulting image. A build-only check would pass for an image that cannot start —
+  # which is the "exists but does not work" shape this repo keeps finding.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image (amd64 only here; release builds both natively)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: catalog-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The binary in the image must be real
+        run: |
+          set -euo pipefail
+          # A dependency-cache layer builds dummy sources. If the real build were skipped
+          # the image would still start and serve nothing, so assert the artifact's size
+          # and that it carries the route strings.
+          SZ=$(docker run --rm --entrypoint /bin/sh catalog-server:ci -c 'stat -c %s /app/catalog-server')
+          echo "binary bytes: $SZ"
+          test "$SZ" -gt 1000000
+          docker run --rm --entrypoint /bin/sh catalog-server:ci \
+            -c 'strings /app/catalog-server | grep -q "api/catalog"'
+
+      - name: The container must actually SERVE /api/catalog/*
+        run: |
+          set -euo pipefail
+          docker volume create catdata >/dev/null
+          docker run -d --name cat -p 8091:8091 \
+            -e NOETL_INTERNAL_API_TOKEN=ci-token \
+            -v catdata:/data/catalog catalog-server:ci
+          # Poll, with a bounded wait and a loud failure. `curl` is in the image on
+          # purpose — a container whose health cannot be probed from inside is a
+          # container whose health is unknowable.
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 3 http://127.0.0.1:8091/api/catalog/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS --max-time 10 http://127.0.0.1:8091/api/catalog/health
+          echo
+          # A real write + read through the image, not just a health 200: a token-guarded
+          # POST, then the reverse index that write should appear in.
+          curl -fsS -X POST http://127.0.0.1:8091/api/catalog/types \
+            -H 'content-type: application/json' -H 'authorization: Bearer ci-token' \
+            -d '{"name":"playbook"}' >/dev/null
+          curl -fsS -X POST http://127.0.0.1:8091/api/catalog/objects \
+            -H 'content-type: application/json' -H 'authorization: Bearer ci-token' \
+            -d '{"resource_type":"playbook","path":"ci/probe"}' >/dev/null
+          curl -fsS -X POST http://127.0.0.1:8091/api/catalog/attributes \
+            -H 'content-type: application/json' -H 'authorization: Bearer ci-token' \
+            -d '{"path":"ci/probe","name":"uses_credential.ci","value":{"type":"flag"}}' >/dev/null
+          GOT=$(curl -fsS "http://127.0.0.1:8091/api/catalog/by-attribute?name=uses_credential.ci")
+          echo "reverse index: $GOT"
+          echo "$GOT" | grep -q 'ci/probe'
+          # And an unauthenticated write must be refused, in the image, not just in tests.
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:8091/api/catalog/types \
+            -H 'content-type: application/json' -d '{"name":"nope"}')
+          echo "unauthenticated write: $CODE"
+          test "$CODE" = "403" || test "$CODE" = "401" || test "$CODE" = "503"
+          docker logs cat | tail -5
+          docker rm -f cat >/dev/null
