@@ -136,11 +136,17 @@ const CRITERIA: [(&str, &str, Status); 10] = [
         "AC10",
         "the existing /api/catalog wire shapes are unchanged; the e2e register->execute loop passes",
         Status::Open(
-            "NOT MET, and not fakeable from inside this crate. It requires the real \
-             noetl-server, and nothing in noetl/server links catalog-store yet — the \
-             crate has no consumer on any serving path. Discharging it needs a server \
-             integration, which is a separate change with its own owner gate. Recorded \
-             rather than ticked.",
+            "STILL NOT MET, but for a narrower reason than before. The 'no consumer on \
+             any serving path' half is CLOSED: `catalog-api` serves /api/catalog/* over \
+             the store, and `catalog-api/tests/api_acceptance.rs` drives declare-type, \
+             register, and all four query shapes (by type, by attribute, by relation, by \
+             reverse-relation) over HTTP with set-equality assertions. What remains is \
+             the literal wording: 'the EXISTING /api/catalog wire shapes are unchanged' \
+             and 'the e2e register->execute loop passes' are claims about \
+             noetl/server's surface and its execute path, and nothing in noetl/server \
+             links catalog-store. That is a server integration with its own owner gate. \
+             ⚠ Recorded rather than re-pointed at this crate's own API, which would be \
+             citing a different surface than the criterion names.",
         ),
     ),
 ];
