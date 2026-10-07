@@ -399,7 +399,13 @@ impl RelationOp {
             RelationOpKind::Asserted(r) => (
                 r.to_entity.path.clone(),
                 r.to_entity.version,
-                format!("{:?}", r.kind),
+                // ⚠⚠ The kind LABEL, never `format!("{:?}", kind)`. `References`
+                // carries a `ForeignKey`, so the Debug rendering would put the
+                // payload into the edge identity — and then one foreign key
+                // re-asserted with corrected metadata becomes a SECOND edge, while a
+                // retraction naming it matches nothing. Measured before this fix:
+                // 1 FK -> 2 edges, and an unremovable stale edge.
+                r.kind.discriminant().to_string(),
             ),
             RelationOpKind::Retracted { to, kind } => (to.path.clone(), to.version, kind.clone()),
             // A reverse row keyed by its own identity, so it can never collapse a
