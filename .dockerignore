@@ -1,0 +1,6 @@
+# ⚠ Anchored patterns. An unanchored `target` would also exclude any nested directory
+# called target, and an unanchored rule is how a build silently omitted a needed path
+# in this fleet before.
+/target
+/.git
+/.github

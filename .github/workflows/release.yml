@@ -1,0 +1,115 @@
+name: release-catalog
+
+# Publishes ghcr.io/noetl/catalog as a multi-arch manifest list.
+#
+# ⚠ WHY arm64 IS NOT OPTIONAL: noetl/server shipped amd64-only images and the local kind
+# cluster is arm64, so every kind validation failed on an image that was "published"
+# (server#303). A catalog that cannot run on the validation cluster cannot be validated.
+#
+# ⚠ Native runners per arch, no QEMU: an emulated arm64 Rust build is prohibitively slow.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v prefix (e.g. 0.2.0). Empty = current Cargo.toml."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ⚠ THE TAG IS AUTHORITATIVE, NOT Cargo.toml.
+          #
+          # Asserting tag == Cargo.toml is the 2026-08-03 regression in noetl/server:
+          # it made a manual bump look mandatory, two authorities then acted on one
+          # merge, and `main` ended up claiming a LOWER version than the newest tag.
+          # semantic-release does not push its bump back to main here either, so the
+          # committed value is a FLOOR and is expected to lag. Every build job
+          # re-stamps from this output instead.
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            V="${{ github.event.inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          case "$V" in
+            ''|v*) echo "refusing an empty or v-prefixed version: '$V'" >&2; exit 1 ;;
+          esac
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "releasing $V"
+
+  publish-image:
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch_tag: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch_tag: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stamp the release version into Cargo.toml
+        run: ./ci/stamp-version.sh "${{ needs.verify-version.outputs.version }}"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: ${{ matrix.platform }}
+          tags: ghcr.io/noetl/catalog:${{ needs.verify-version.outputs.version }}-${{ matrix.arch_tag }}
+
+  publish-manifest:
+    runs-on: ubuntu-latest
+    needs: [verify-version, publish-image]
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create + push the multi-arch manifest list
+        env:
+          VERSION: ${{ needs.verify-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t ghcr.io/noetl/catalog:${VERSION} \
+            -t ghcr.io/noetl/catalog:latest \
+            ghcr.io/noetl/catalog:${VERSION}-amd64 \
+            ghcr.io/noetl/catalog:${VERSION}-arm64
+          echo "=== manifest list ==="
+          docker buildx imagetools inspect ghcr.io/noetl/catalog:${VERSION}
+          # ⚠ Assert BOTH architectures are in the list. A manifest list with one arch
+          # publishes successfully and then fails only on the cluster whose arch is
+          # missing — which is exactly how server#303 was found, late.
+          N=$(docker buildx imagetools inspect --raw ghcr.io/noetl/catalog:${VERSION} \
+                | grep -c '"architecture"' || true)
+          echo "architectures in the manifest list: $N"
+          test "$N" -ge 2
