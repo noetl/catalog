@@ -146,6 +146,69 @@ count is 0; when P2 lands the four `c1..c4` datasets it becomes exactly 4 and mu
 dataset, the model has regressed to the per-type-table shape this repo exists to
 remove.
 
+## Two catalogs — and `noetl/catalog` is the internal one
+
+⚠⚠ **These are different concerns with different storage, and conflating them is the one
+architectural mistake this page exists to prevent.**
+
+| | **Internal catalog** — *this repo* | **Business catalog** — *not this repo* |
+| :-- | :-- | :-- |
+| **What it holds** | noetl's own objects: `playbook`, `credential`, `mcp`, `agent`, `memory`, `subscription` | domain data: hotels, flights, trips, items, categories, orders, their translations |
+| **Storage** | **EHDB only.** No external datastore, ever | **anything** — external Postgres, a third-party API, an object store |
+| **Interface** | `/api/catalog/*` over the EHDB-backed store | a **playbook step**, under that playbook's policy block |
+| **Who owns it** | the platform | the domain / the application |
+| **Schema** | one polymorphic identity; a new object type is **rows, not schema** | whatever the domain needs — a real relational schema is normal here |
+
+### The line, stated once
+
+> **The internal catalog holds the playbook that reads the business data. It never holds the
+> business data.**
+
+Concretely, from `noetl/travel`:
+
+* `adiona/playbooks/catalog_list.yaml` is a **playbook** — an internal object. The internal
+  catalog registers it, and records `uses_tool.postgres` and
+  `uses_credential.adiona_actor` about it.
+* What that playbook *reads* — `adiona.items`, `adiona.item_content`,
+  `adiona.item_category` in **external Postgres**, via `kind: postgres` with
+  `auth: adiona_actor` — is the **business catalog**. None of it enters EHDB.
+
+**Business-catalog data must not be pushed into this repo's store.** Not as a resource type,
+not as attributes, not as relations. The internal catalog's generality is over **noetl
+object types**, never over arbitrary business schemas.
+
+### The existing business-catalog mechanism, as it already works
+
+Nothing needs designing here — it exists, and it is playbooks:
+
+| domain surface | how a playbook reaches it |
+| :-- | :-- |
+| the adiona relational catalog | **53** `adiona/playbooks/*.yaml`, `kind: postgres`, `auth: adiona_actor`, against the external `adiona.*` schema |
+| flights | `mcp/duffel` (3 playbooks) |
+| hotels | `mcp/hotelbeds` (2 playbooks) |
+| places | `mcp/google-places` (3 playbooks) |
+| documents | `mcp/firestore` (3 playbooks) |
+
+This is the shape `execution-model.md` already mandates: *any data touch happens inside a
+playbook step under that playbook's policy block*, with the credential referenced by
+keychain alias. The business catalog **is** that pattern; it is not a component to build.
+
+### Why adiona was only ever "inspiration" here
+
+Because adiona **is** a business catalog. Its relational/EAV model belongs to the business
+side, and it already lives there — in external Postgres, read per step. What the internal
+catalog took from it is *structural*: one polymorphic identity instead of a table per entity
+type, the EAV collapse, a self-referencing taxonomy, a typed value union. Its **tables** were
+never the target, which is why there is no DDL parser and why the acceptance proof is
+set-equality over noetl's own objects.
+
+⚠ **Localization is the clearest case.** It was added here citing adiona's 24
+`_translate` / `_content` tables — and those are business-catalog tables.
+`adiona.item_content` carries `lang_code` in external Postgres, read by a playbook step.
+The `lang` dimension in this store therefore has **no demonstrated internal consumer**: it
+is inert (`lang` defaults to `None`; the neutral read excludes translations) and is not
+built on further.
+
 ## Scope, as of 2026-10-07
 
 **A generic catalog for noetl's own internal object types, stored in EHDB, reachable only
