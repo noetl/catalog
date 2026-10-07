@@ -322,6 +322,47 @@ impl CatalogStore {
     pub fn set_attribute(&mut self, path: &str, attr: Attribute) -> Result<u64> {
         AttributeOp::assert_forward_path_is_not_a_reverse_key(path)
             .map_err(ehdb_core::EhdbError::InvalidIdentifier)?;
+
+        // ⚠⚠ Validated HERE and deliberately NOT during extraction.
+        //
+        // This is an explicit write: a caller asserting a fact. `register_from_source`'s
+        // extraction is not validated, and its doc comment says why — "Extraction is
+        // additive information about a registration, never a gate on it", because
+        // noetl/server accepts documents this extractor reads imperfectly, and refusing a
+        // registration on an extraction result would make the catalog reject things the
+        // platform accepts.
+        //
+        // The constraints are only those noetl itself enforces, cited in
+        // `catalog_model::constraints`. A speculative constraint is worse than none: it
+        // refuses real data and gets switched off.
+        catalog_model::validate_attribute(&attr.name, &attr.value)
+            .map_err(|v| ehdb_core::EhdbError::InvalidIdentifier(v.to_string()))?;
+        self.set_attribute_unchecked(path, attr)
+    }
+
+    /// Set an attribute **without** constraint validation.
+    ///
+    /// ⚠⚠ Used only by extraction, and the asymmetry is the whole point. The first draft
+    /// put validation in `set_attribute` alone and believed that was enough — but
+    /// `register_from_source` *calls* `set_attribute`, so enforcement leaked into the
+    /// extraction path and real data caught it within seconds:
+    ///
+    /// ```text
+    /// catalog: ingest: invalid identifier: attribute "uses_tool.agent": "agent" is not
+    /// one of noetl's 25 tool kinds
+    /// ```
+    ///
+    /// `noetl/travel`'s `playbooks/catalog/calendar/list.yaml` really does declare a step
+    /// with `tool.kind: agent` — a kind `validate_tool_kinds` rejects (noetl/ai-meta#256),
+    /// so that playbook cannot run. Refusing to *catalogue* it would make the catalog
+    /// blind to exactly the documents worth finding: the whole value of recording
+    /// `uses_tool.agent` is that someone can then ask which resources are unrunnable.
+    ///
+    /// So extraction records what the document says, and an explicit write asserts a
+    /// claim. A catalogue that only admits valid data cannot report invalid data.
+    fn set_attribute_unchecked(&mut self, path: &str, attr: Attribute) -> Result<u64> {
+        AttributeOp::assert_forward_path_is_not_a_reverse_key(path)
+            .map_err(ehdb_core::EhdbError::InvalidIdentifier)?;
         let name = attr.name.clone();
         let op = AttributeOp {
             // Assigned by the engine in `append_writer_assigned`; see
@@ -553,7 +594,11 @@ impl CatalogStore {
         }
         let mut attributes = 0;
         for a in attrs {
-            self.set_attribute(&path, a)?;
+            // ⚠ UNCHECKED, deliberately — see `set_attribute_unchecked`. Extraction
+            // records what the document declares, including a tool kind the platform
+            // rejects, because that is a fact worth having rather than a reason to refuse
+            // the document.
+            self.set_attribute_unchecked(&path, a)?;
             attributes += 1;
         }
         Ok(Registered {

@@ -520,3 +520,281 @@ async fn absent_things_are_404_not_empty_200() {
     let (st, _) = call(&app, get("/api/catalog/types/nosuchtype")).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+// ===========================================================================
+// Attribute constraints, over HTTP
+// ===========================================================================
+
+/// A constrained attribute is enforced on an **explicit write**, and the rejection offers
+/// the valid set so the caller can comply.
+#[tokio::test]
+async fn a_constrained_attribute_is_enforced_on_an_explicit_write() {
+    let Api { app, _dir } = api();
+    let (st, _) = call(
+        &app,
+        post_auth(
+            "/api/catalog/objects",
+            serde_json::json!({ "resource_type": "subscription", "path": "hooks/s1" }),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+
+    // Every value noetl actually allows is accepted.
+    for src in ["pubsub", "nats", "kafka", "webhook"] {
+        let (st, b) = call(
+            &app,
+            post_auth(
+                "/api/catalog/attributes",
+                serde_json::json!({"path":"hooks/s1","name":"spec.source","value":src}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{src} is a real noetl source: {b}");
+    }
+
+    // A value noetl rejects at registration is refused here too — the catalog must not
+    // record as fact something the platform would not accept.
+    let (st, body) = call(
+        &app,
+        post_auth(
+            "/api/catalog/attributes",
+            serde_json::json!({"path":"hooks/s1","name":"spec.source","value":"rabbitmq"}),
+        ),
+    )
+    .await;
+    println!("refused: {st} {body}");
+    assert_eq!(
+        st,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a bad value must not be stored"
+    );
+    let msg = body.as_str().unwrap_or_default();
+    // ⚠ The rejection must name the offender AND offer the valid set.
+    assert!(
+        msg.contains("rabbitmq"),
+        "must quote the offending value: {msg}"
+    );
+    assert!(msg.contains("pubsub"), "must offer the valid set: {msg}");
+
+    // And the refusal stored nothing.
+    let (st, b) = call(&app, get("/api/catalog/attributes/hooks/s1")).await;
+    assert_eq!(st, StatusCode::OK);
+    // ⚠ My first draft guessed the JSON shape as `{"Text": ...}`. `AttributeValue` is
+    // `#[serde(tag = "type", content = "value", rename_all = "snake_case")]`, so it is
+    // `{"type":"text","value":"webhook"}`. Asserting the real wire shape, since this is
+    // the shape a client has to parse.
+    assert_eq!(
+        b["spec.source"]["value"]["type"], "text",
+        "the typed union must keep its tag on the wire"
+    );
+    assert_eq!(
+        b["spec.source"]["value"]["value"], "webhook",
+        "the last VALID write must still be the live value — a refused write must not \
+         disturb it"
+    );
+
+    // A rejected tool kind is refused, and `agent`/`mcp` are the interesting case: valid
+    // resource types, rejected tool kinds.
+    for bad in ["agent", "mcp"] {
+        let (st, body) = call(
+            &app,
+            post_auth(
+                "/api/catalog/attributes",
+                serde_json::json!({"path":"hooks/s1","name":format!("uses_tool.{bad}"),"value":true}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{bad}: {body}");
+    }
+    // A real tool kind is accepted.
+    let (st, _) = call(
+        &app,
+        post_auth(
+            "/api/catalog/attributes",
+            serde_json::json!({"path":"hooks/s1","name":"uses_tool.postgres","value":true}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+/// The constraints are **published**, and what is published must match what is enforced —
+/// a caller refused by a rule it cannot read has no way to comply.
+#[tokio::test]
+async fn the_constraints_are_published_and_match_what_is_enforced() {
+    let Api { app, _dir } = api();
+    let (st, b) = call(&app, get("/api/catalog/constraints")).await;
+    assert_eq!(st, StatusCode::OK);
+    println!(
+        "published: {}",
+        serde_json::to_string_pretty(&b).unwrap_or_default()
+    );
+
+    let entries = b["constraints"].as_array().expect("constraints");
+    assert_eq!(entries.len(), 4, "four constrained attributes");
+
+    // The asymmetry is documented in the response itself.
+    assert!(b["enforced_on"]
+        .as_str()
+        .unwrap_or("")
+        .contains("explicit write"));
+    assert!(b["not_enforced_on"]
+        .as_str()
+        .unwrap_or("")
+        .contains("extraction"));
+
+    // uses_tool publishes all 25 real kinds.
+    let tool = entries
+        .iter()
+        .find(|e| e["attribute"] == "uses_tool.<kind>")
+        .expect("uses_tool entry");
+    assert_eq!(
+        tool["allowed"].as_array().expect("allowed").len(),
+        25,
+        "noetl has 25 tool kinds"
+    );
+
+    // ⚠ Every published value must actually be accepted — otherwise the published list is
+    // a decorative representation of a rule it does not describe.
+    let (st, _) = call(
+        &app,
+        post_auth(
+            "/api/catalog/objects",
+            serde_json::json!({ "resource_type": "subscription", "path": "hooks/s2" }),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    for e in entries {
+        let name = e["attribute"].as_str().unwrap_or("");
+        if name.contains('<') {
+            continue; // the templated one is covered above
+        }
+        for v in e["allowed"].as_array().expect("allowed") {
+            let (st, b) = call(
+                &app,
+                post_auth(
+                    "/api/catalog/attributes",
+                    serde_json::json!({"path":"hooks/s2","name":name,"value":v}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::OK,
+                "{name} publishes {v} but rejects it: {b}"
+            );
+        }
+    }
+}
+
+/// ⚠⚠ Ingestion must NOT be gated by the constraints. A document declaring a value noetl
+/// rejects is still catalogued — recording it is how anyone finds it.
+///
+/// This is not hypothetical: `noetl/travel`'s `playbooks/catalog/calendar/list.yaml`
+/// declares `tool.kind: agent`, which `validate_tool_kinds` rejects (noetl/ai-meta#256).
+/// The first draft validated inside `set_attribute`, which `register_from_source` calls —
+/// so enforcement leaked into extraction and the real corpus failed to ingest at all.
+#[tokio::test]
+async fn ingestion_records_a_value_the_platform_would_reject() {
+    let Api { app, _dir } = api();
+    let dir = tempfile::tempdir().expect("td");
+    let src = dir.path().join("pb");
+    std::fs::create_dir_all(&src).expect("mkdir");
+    std::fs::write(
+        src.join("unrunnable.yaml"),
+        "kind: Playbook\nmetadata:\n  path: pb/unrunnable\nworkflow:\n  - step: s\n    tool:\n      kind: agent\n      path: a/b\n",
+    )
+    .expect("write");
+
+    let (st, b) = call(
+        &app,
+        post_auth(
+            "/api/catalog/ingest",
+            serde_json::json!({"source": format!("dir:{}", dir.path().display()), "subpath": "pb"}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "ingestion must not be gated: {b}");
+    println!("ingest: {b}");
+    assert_eq!(b["scanned"], 1);
+    assert_eq!(
+        b["registered"], 1,
+        "the document registered despite a rejected tool kind"
+    );
+    assert_eq!(b["accounts_for_every_file"], true);
+
+    // ⭐ And the whole point: the unrunnable playbook is now QUERYABLE.
+    let (st, b) = call(&app, get("/api/catalog/by-attribute?name=uses_tool.agent")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(b["count"], 1);
+    assert_eq!(b["paths"][0], "pb/unrunnable");
+
+    // ⚠ But an EXPLICIT write of the same fact is still refused — the asymmetry holds in
+    // both directions at once.
+    let (st, _) = call(
+        &app,
+        post_auth(
+            "/api/catalog/attributes",
+            serde_json::json!({"path":"pb/unrunnable","name":"uses_tool.agent","value":true}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an explicit assertion of a rejected kind must still be refused"
+    );
+}
+
+/// Bulk ingest over HTTP reports its denominator and every skip reason.
+#[tokio::test]
+async fn bulk_ingest_over_http_reports_the_denominator() {
+    let Api { app, _dir } = api();
+    let dir = tempfile::tempdir().expect("td");
+    let src = dir.path().join("objs");
+    std::fs::create_dir_all(&src).expect("mkdir");
+    for (f, body) in [
+        ("ok.yaml", "kind: Playbook\nmetadata:\n  path: a/ok\n"),
+        ("cred.yaml", "kind: Credential\nmetadata:\n  path: c/one\n"),
+        ("new.yaml", "kind: Dashboard\nmetadata:\n  path: d/one\n"),
+        ("broken.yaml", "kind: Playbook\n  bad: [unclosed\n"),
+        ("nokind.yaml", "metadata:\n  path: x/y\n"),
+    ] {
+        std::fs::write(src.join(f), body).expect("write");
+    }
+
+    let (st, b) = call(
+        &app,
+        post_auth(
+            "/api/catalog/ingest",
+            serde_json::json!({"source": format!("dir:{}", dir.path().display()), "subpath": "objs"}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    println!("bulk ingest: {b}");
+    assert_eq!(b["scanned"], 5, "the denominator");
+    assert_eq!(b["registered"], 3);
+    assert_eq!(b["skipped"].as_array().expect("skipped").len(), 2);
+    assert_eq!(b["accounts_for_every_file"], true);
+    // A non-noetl type registered and is REPORTED, not refused.
+    let nt: Vec<String> = serde_json::from_value(b["new_types"].clone()).expect("nt");
+    assert_eq!(nt, vec!["dashboard".to_string()]);
+    // Every skip carries a reason.
+    for s in b["skipped"].as_array().expect("skipped") {
+        assert!(!s["reason"].as_str().unwrap_or("").is_empty());
+    }
+
+    // A bad source spec is refused rather than silently scanning nothing.
+    let (st, _) = call(
+        &app,
+        post_auth(
+            "/api/catalog/ingest",
+            serde_json::json!({"source": "nonsense"}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}

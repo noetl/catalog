@@ -505,6 +505,143 @@ pub async fn relations_to(
 }
 
 // ---------------------------------------------------------------------------
+// bulk ingest — walk a source over the API
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct IngestRequest {
+    /// `dir:/path` or `git:/repo@ref`. The git form reads the **ref**, not the working
+    /// tree — a stale checkout is the most reliable way to produce a confident zero.
+    pub source: String,
+    #[serde(default)]
+    pub subpath: String,
+}
+
+#[derive(Serialize)]
+pub struct IngestResult {
+    pub source: String,
+    /// **The denominator.** Files the walker considered.
+    pub scanned: usize,
+    pub registered: usize,
+    pub relations: usize,
+    pub attributes: usize,
+    pub skipped: Vec<SkipView>,
+    pub by_kind: BTreeMap<String, usize>,
+    /// Types this run catalogued that are not among noetl's six known ones. Reported,
+    /// never refused — a typo must be visible, not rejected.
+    pub new_types: Vec<String>,
+    /// Whether `scanned == registered + skipped`. A walk that drops files otherwise
+    /// reports a clean run.
+    pub accounts_for_every_file: bool,
+}
+
+#[derive(Serialize)]
+pub struct SkipView {
+    pub origin: String,
+    pub reason: String,
+}
+
+/// **Ingest a whole source over the API.** Before this, ingestion over HTTP was one object
+/// at a time and the walker was reachable only from the CLI — which contradicted
+/// "API-only" for the one path that matters most.
+pub async fn ingest(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<IngestRequest>,
+) -> ApiResult<Json<IngestResult>> {
+    require_internal_token(&state, &headers)?;
+    let source = parse_source(&req.source).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "source {:?} must be `dir:<path>` or `git:<repo>@<ref>`",
+                req.source
+            ),
+        )
+    })?;
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let res = {
+        let mut s = lock(&state)?;
+        catalog_ingest::ingest(&mut s, &source, &req.subpath, at)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("ingest: {e}")))?
+    };
+
+    // ⚠ The accounting is reported, not asserted away. A caller must be able to see that
+    // the walk balanced, because `scanned=N registered=N skipped=0` is also what a run
+    // that silently dropped files looks like.
+    Ok(Json(IngestResult {
+        source: source.label(),
+        scanned: res.scanned,
+        registered: res.registered,
+        relations: res.relations,
+        attributes: res.attributes,
+        skipped: res
+            .skipped
+            .iter()
+            .map(|(p, r)| SkipView {
+                origin: p.display().to_string(),
+                reason: r.to_string(),
+            })
+            .collect(),
+        by_kind: res.by_kind.clone(),
+        new_types: res.new_types.iter().cloned().collect(),
+        accounts_for_every_file: res.accounts_for_every_file(),
+    }))
+}
+
+fn parse_source(spec: &str) -> Option<catalog_ingest::Source> {
+    if let Some(rest) = spec.strip_prefix("git:") {
+        let at = rest.rfind('@')?;
+        return Some(catalog_ingest::Source::GitRef {
+            repo: std::path::PathBuf::from(&rest[..at]),
+            reference: rest[at + 1..].to_string(),
+        });
+    }
+    if let Some(p) = spec.strip_prefix("dir:") {
+        return Some(catalog_ingest::Source::Dir(std::path::PathBuf::from(p)));
+    }
+    None
+}
+
+/// The attribute constraints this catalog enforces, and their allowed values.
+///
+/// ⚠ Published deliberately. A caller refused by a constraint it cannot see has no way to
+/// comply — the same reason `noetl/server` quotes its valid set in a rejection.
+#[derive(Serialize)]
+pub struct ConstraintsView {
+    pub enforced_on: &'static str,
+    pub not_enforced_on: &'static str,
+    pub constraints: Vec<ConstraintEntry>,
+}
+
+#[derive(Serialize)]
+pub struct ConstraintEntry {
+    pub attribute: String,
+    pub allowed: Vec<String>,
+}
+
+pub async fn constraints() -> Json<ConstraintsView> {
+    Json(ConstraintsView {
+        enforced_on: "POST /api/catalog/attributes — an explicit write, where a caller \
+                      asserts a fact",
+        not_enforced_on: "extraction during registration — a document declaring a value \
+                          noetl rejects is still catalogued, because recording it is how \
+                          anyone finds it",
+        constraints: catalog_model::constraints::described_constraints()
+            .into_iter()
+            .map(|(attribute, allowed)| ConstraintEntry {
+                attribute: attribute.to_string(),
+                allowed: allowed.into_iter().map(String::from).collect(),
+            })
+            .collect(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // lifecycle
 // ---------------------------------------------------------------------------
 
