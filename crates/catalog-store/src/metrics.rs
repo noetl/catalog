@@ -43,7 +43,13 @@ pub const INGEST_OUTCOMES: [&str; 3] = ["scanned", "registered", "skipped"];
 
 /// Why a document was skipped. A **closed** set — it mirrors `catalog_ingest::SkipReason`
 /// arm for arm, and `every_skip_reason_arm_is_pinned` fails if the two drift.
-pub const SKIP_REASONS: [&str; 4] = ["unparseable", "no_kind", "no_metadata_path", "unknown_kind"];
+pub const SKIP_REASONS: [&str; 3] = ["unparseable", "no_kind", "no_metadata_path"];
+
+// ⚠ `unknown_kind` was removed together with the kind allowlist. With every kind
+// accepted, no document can produce that skip — and a pinned label no code path can
+// reach is an inert series: it reads 0 forever, indistinguishable from a healthy one.
+// The reachability direction of the drift guard is what caught it, after the
+// existence-only direction had passed.
 
 struct Metrics {
     registry: Registry,

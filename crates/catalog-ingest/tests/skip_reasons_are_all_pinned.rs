@@ -21,9 +21,22 @@ fn label_of(r: &SkipReason) -> &'static str {
         SkipReason::Unparseable(_) => "unparseable",
         SkipReason::NoKind => "no_kind",
         SkipReason::NoMetadataPath => "no_metadata_path",
-        SkipReason::UnknownKind(_) => "unknown_kind",
     }
 }
+
+/// ⚠⚠ The metrics registry is a **process global**, and `cargo test` does **not**
+/// serialise tests. Any test that increments it perturbs any test that measures it, so
+/// every test in this file that touches the counters takes this lock.
+///
+/// This is not hypothetical and not foresight — it is a failure that reached CI. The
+/// delta-measuring test read `scanned=+6` for a run that scanned **3**, because the
+/// reachability test below ingests concurrently. It passed locally and failed in CI,
+/// which is the ordinary way a race announces itself: local timing hid it.
+///
+/// ⚠ The hazard was already documented in `metrics_pinned_and_moving.rs` — and then
+/// violated by the very next test added, in a different file. A warning in one file does
+/// not protect another.
+static COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn write(root: &std::path::Path, rel: &str, body: &str) {
     let p = root.join(rel);
@@ -40,7 +53,6 @@ fn every_skip_reason_arm_is_pinned_and_every_pin_is_reachable() {
         SkipReason::Unparseable("x".into()),
         SkipReason::NoKind,
         SkipReason::NoMetadataPath,
-        SkipReason::UnknownKind("Dashboard".into()),
     ];
     println!(
         "SkipReason arms: {}   pinned labels: {}",
@@ -63,8 +75,7 @@ fn every_skip_reason_arm_is_pinned_and_every_pin_is_reachable() {
         );
     }
 
-    // Direction 2: every pinned label is produced by some arm — a pin nothing can reach
-    // is an inert series that reads 0 forever and looks healthy.
+    // Direction 2: every pinned label is produced by some arm.
     let produced: Vec<&str> = all.iter().map(label_of).collect();
     for l in metrics::SKIP_REASONS {
         assert!(
@@ -74,10 +85,59 @@ fn every_skip_reason_arm_is_pinned_and_every_pin_is_reachable() {
     }
 }
 
+/// ⚠⚠ Direction 2 above checks the arm EXISTS, not that `ingest` can PRODUCE it — which
+/// is existence-vs-reachability inside my own guard. It passed while
+/// `SkipReason::UnknownKind` had become unconstructible after the allowlist was removed:
+/// a hand-built list of arms proves nothing about the code path.
+///
+/// This drives a real ingestion that triggers every reason, so a reason no document can
+/// cause fails here.
+#[test]
+fn every_pinned_reason_is_reachable_from_a_real_ingestion() {
+    // Held because this ingests, which increments the shared registry.
+    let _guard = COUNTERS.lock().expect("counter lock");
+    let dir = tempfile::tempdir().expect("td");
+    let src = dir.path().join("src");
+    // One document per skip reason, and nothing else.
+    write(
+        &src,
+        "pb/unparseable.yaml",
+        "kind: Playbook\n  bad: [unclosed\n",
+    );
+    write(&src, "pb/no_kind.yaml", "metadata:\n  path: a/b\n");
+    write(
+        &src,
+        "pb/no_path.yaml",
+        "kind: Playbook\nmetadata:\n  name: x\n",
+    );
+
+    let mut store = CatalogStore::open(&StoreConfig::new(dir.path().join("store"))).expect("open");
+    let res = ingest(&mut store, &Source::Dir(src), "pb", 1).expect("ingest");
+    println!("{}", res.summary());
+
+    let produced: std::collections::BTreeSet<&str> =
+        res.skipped.iter().map(|(_, r)| label_of(r)).collect();
+    println!("reasons a real ingestion produced: {produced:?}");
+    assert_eq!(
+        res.scanned, 3,
+        "the fixture must contain exactly one document per reason"
+    );
+    for l in metrics::SKIP_REASONS {
+        assert!(
+            produced.contains(&l),
+            "pinned reason {l:?} cannot be produced by ANY document — it is an inert \
+             series that will read 0 forever"
+        );
+    }
+    assert_eq!(produced.len(), metrics::SKIP_REASONS.len());
+}
+
 /// An end-to-end check that a real ingestion moves the real counters, so the wiring
 /// between `ingest` and `record_*` is exercised rather than assumed.
 #[test]
 fn a_real_ingestion_moves_the_counters() {
+    // Held because this MEASURES deltas on the shared registry.
+    let _guard = COUNTERS.lock().expect("counter lock");
     metrics::init();
     let dir = tempfile::tempdir().expect("td");
     let src = dir.path().join("src");

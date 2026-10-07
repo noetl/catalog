@@ -75,7 +75,7 @@ fn every_closed_label_value_is_pinned_and_then_moves() {
         }
     }
     println!(
-        "pinned series checked: {} (3 tick + 3 ingest + 4 skip), missing: {}",
+        "pinned series checked: {} (3 tick + 3 ingest + 3 skip), missing: {}",
         metrics::TICK_OUTCOMES.len() + metrics::INGEST_OUTCOMES.len() + metrics::SKIP_REASONS.len(),
         missing.len()
     );
@@ -94,7 +94,7 @@ fn every_closed_label_value_is_pinned_and_then_moves() {
     metrics::record_tick(2, 3, 48);
     metrics::record_ingest(53, 49, 4);
     metrics::record_skip("no_kind");
-    metrics::record_skip("unknown_kind");
+    metrics::record_skip("no_metadata_path");
 
     let after = metrics::render();
     for want in [
@@ -106,7 +106,7 @@ fn every_closed_label_value_is_pinned_and_then_moves() {
         "catalog_ingest_total{outcome=\"registered\"} 49",
         "catalog_ingest_total{outcome=\"skipped\"} 4",
         "catalog_ingest_skipped_total{reason=\"no_kind\"} 1",
-        "catalog_ingest_skipped_total{reason=\"unknown_kind\"} 1",
+        "catalog_ingest_skipped_total{reason=\"no_metadata_path\"} 1",
     ] {
         assert!(
             after.contains(want),
@@ -114,9 +114,8 @@ fn every_closed_label_value_is_pinned_and_then_moves() {
         );
     }
 
-    // And the reasons that did NOT fire must still read 0, not vanish.
+    // And the reason that did NOT fire must still read 0, not vanish.
     assert!(after.contains("catalog_ingest_skipped_total{reason=\"unparseable\"} 0"));
-    assert!(after.contains("catalog_ingest_skipped_total{reason=\"no_metadata_path\"} 0"));
 }
 
 /// An unrecognised reason must not create an unpinned series — that would reintroduce
