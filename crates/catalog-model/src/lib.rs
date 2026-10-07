@@ -31,9 +31,11 @@ mod entity;
 mod relation;
 mod resource_type;
 
+pub mod constraints;
 pub mod noetl_types;
 
 pub use attribute::{Attribute, AttributeValue};
+pub use constraints::{validate_attribute, ConstraintViolation};
 pub use entity::{Entity, EntityRef};
 pub use noetl_types::{is_known_noetl_type, noetl_resource_types, noetl_type_description};
 pub use relation::{

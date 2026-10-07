@@ -113,6 +113,10 @@ pub fn router(state: ApiState) -> Router {
             "/api/catalog/relations-to/{*path}",
             get(handlers::relations_to),
         )
+        // --- bulk ingest: walk a whole source over the API ---
+        .route("/api/catalog/ingest", post(handlers::ingest))
+        // --- the constraints this catalog enforces, and where ---
+        .route("/api/catalog/constraints", get(handlers::constraints))
         // --- lifecycle + observability ---
         .route("/api/catalog/tick", post(handlers::tick))
         .route("/metrics", get(handlers::metrics))
