@@ -30,6 +30,7 @@ USAGE:
   catalog list   --store <dir> [--type NAME]
   catalog show   --store <dir> --path <catalog/path>
   catalog who-uses --store <dir> --attr <attribute.name>
+  catalog who-calls --store <dir> --path <catalog/path>
 
 NOTES:
   --source git:REPO@REF reads the REF, not the working tree. Prefer it: a stale
@@ -240,6 +241,26 @@ fn run(args: &[String]) -> Result<(), String> {
                     "⚠ nothing carries {attr}. Check the spelling, and whether this \
                      store has been ingested — an empty reverse answer and an \
                      un-ingested store look identical."
+                );
+            }
+            Ok(())
+        }
+        // The edge direction that matters when retiring a resource.
+        "who-calls" => {
+            let store = open_store(args)?;
+            let path = flag(args, "--path").ok_or("--path is required")?;
+            let callers = store
+                .relations_to(path)
+                .map_err(|e| format!("relations_to: {e}"))?;
+            println!("{path}: {} caller(s)", callers.len());
+            for (from, kind) in &callers {
+                println!("  {from}  ({kind})");
+            }
+            if callers.is_empty() {
+                println!(
+                    "⚠ nothing calls {path}. That is the answer that authorises a \
+                     deletion, so check the store was ingested — an empty caller list \
+                     and an un-ingested store look identical."
                 );
             }
             Ok(())
