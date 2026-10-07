@@ -667,7 +667,23 @@ Recorded as assumptions, not decisions, so they can be overturned cheaply.
    ([§6.5](#65-single-writer-per-partition))
 6. **`noetl.registry` is not migrated here.** ([§9](#9-the-noetlregistry-question))
 7. **`version` widens to `u32`.** ([§4.2](#42-entity--a-catalogued-resource))
-8. **Localization is dropped** from the adiona pattern.
+8. ~~**Localization is dropped** from the adiona pattern.~~ **REVERSED
+   2026-10-06.** Dropping it would make adiona a *false* worked example: **24 of its
+   58 tables are `_translate` / `_content`**, so nearly half the reference schema
+   would be inexpressible and the catalog would not be a generalization of the model
+   it claims to generalize. Localization is now a real `lang` dimension on
+   `Attribute`, folded by `(name, lang)`.
+
+   ⚠ The rejected alternative was encoding the language into the attribute name
+   (`category_name@de`). A probe confirmed it "works" and it is wrong: the language
+   becomes unqueryable, `attributes()` reports one entry per language as though they
+   were different attributes, and nothing can ask which languages exist or fall back
+   to a default.
+
+   ⚠ `None` is **not** `Some("en")`. A playbook's `uses_tool.postgres` has no
+   language; an English label is a translation that happens to be English.
+   Conflating them would make every noetl attribute pretend to be English, so the
+   neutral read (`attributes`) deliberately excludes translations.
 9. **`credential_id` is dropped** as dead — no FK, no reader, no writer in five
    repos.
 10. **The existing shadow catalog log is the predecessor to extend**, not replace.

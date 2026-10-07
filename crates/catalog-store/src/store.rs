@@ -353,6 +353,7 @@ impl CatalogStore {
             path: path.to_string(),
             op: AttributeOpKind::Unset {
                 name: name.to_string(),
+                lang: None,
             },
         };
         let forward_seq = self.attributes.append_writer_assigned(op)?;
@@ -631,17 +632,98 @@ impl CatalogStore {
         // missing reverse row rather than a corrupted forward answer.
         let forward: Vec<_> = ops.into_iter().filter(|o| !o.op.is_reverse()).collect();
 
-        let folded = fold_latest_by(forward, |o| o.op.name().to_string());
+        // ⚠ Folded by (name, lang). Keying on the name alone makes a second language
+        // overwrite the first — measured at 1 translation where 3 were written.
+        let folded = fold_latest_by(forward, |o| o.op.fold_key());
+
         Ok(folded
             .into_iter()
-            .filter_map(|(name, op)| match op.op {
-                AttributeOpKind::Set(a) => Some((name, *a)),
-                AttributeOpKind::Unset { .. } => None,
-                // Unreachable: filtered above. Not `unreachable!()` — a panic in a
-                // read path is worse than returning the rest of a correct answer.
-                AttributeOpKind::Reverse { .. } => None,
+            .filter_map(|((name, lang), op)| match op.op {
+                // The NEUTRAL read returns only language-neutral values. A noetl caller
+                // asking for a playbook's attributes must not receive translations, and
+                // `None` is not `Some("en")`.
+                AttributeOpKind::Set(a) if lang.is_none() => Some((name, *a)),
+                _ => None,
             })
             .collect())
+    }
+
+    /// Every live attribute on `path`, **including every translation**, keyed by
+    /// `(name, lang)`.
+    pub fn attributes_all_langs(
+        &self,
+        path: &str,
+    ) -> Result<BTreeMap<(String, Option<String>), Attribute>> {
+        let ops = self.attributes.read_index_after(path, 0)?;
+        let forward: Vec<_> = ops.into_iter().filter(|o| !o.op.is_reverse()).collect();
+        let folded = fold_latest_by(forward, |o| o.op.fold_key());
+        Ok(folded
+            .into_iter()
+            .filter_map(|(key, op)| match op.op {
+                AttributeOpKind::Set(a) => Some((key, *a)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Read `path`'s attributes **in one language**, falling back to the
+    /// language-neutral value where no translation exists.
+    ///
+    /// ⚠ The fallback is the point. Without it an untranslated attribute would simply
+    /// vanish from a localized read — a partial record that looks complete, which is the
+    /// failure mode this crate keeps finding. adiona encodes the same intent with
+    /// `default_lang_code` on the parent row.
+    ///
+    /// `lang` is matched case-insensitively: `lang_code` arrives as `en`/`EN`/`En`
+    /// across adiona's columns.
+    pub fn attributes_in(&self, path: &str, lang: &str) -> Result<BTreeMap<String, Attribute>> {
+        let want = lang.trim().to_lowercase();
+        let all = self.attributes_all_langs(path)?;
+        let mut out: BTreeMap<String, Attribute> = BTreeMap::new();
+        // Neutral values first, so a translation can overwrite them.
+        for ((name, l), a) in &all {
+            if l.is_none() {
+                out.insert(name.clone(), a.clone());
+            }
+        }
+        for ((name, l), a) in &all {
+            if l.as_deref() == Some(want.as_str()) {
+                out.insert(name.clone(), a.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Which languages `path` has translations in, sorted. Unanswerable if the language
+    /// is encoded in the attribute name.
+    pub fn languages_of(&self, path: &str) -> Result<Vec<String>> {
+        let all = self.attributes_all_langs(path)?;
+        let mut langs: std::collections::BTreeSet<String> = Default::default();
+        for (_, l) in all.keys() {
+            if let Some(l) = l {
+                langs.insert(l.clone());
+            }
+        }
+        Ok(langs.into_iter().collect())
+    }
+
+    /// Remove **one translation**, leaving the other languages and the neutral value.
+    pub fn unset_localized_attribute(&mut self, path: &str, name: &str, lang: &str) -> Result<u64> {
+        AttributeOp::assert_forward_path_is_not_a_reverse_key(path)
+            .map_err(ehdb_core::EhdbError::InvalidIdentifier)?;
+        let op = AttributeOp {
+            op_seq: 0,
+            path: path.to_string(),
+            op: AttributeOpKind::Unset {
+                name: name.to_string(),
+                lang: Some(lang.trim().to_lowercase()),
+            },
+        };
+        // ⚠ No reverse-index tombstone here, deliberately: the reverse index answers
+        // "which resources carry attribute N", which stays true while ANY language or
+        // the neutral value remains. Tombstoning on one translation would drop the
+        // resource from that answer while it still carries the attribute.
+        self.attributes.append_writer_assigned(op)
     }
 
     /// **Reverse lookup: every live resource carrying the attribute `name`.**
