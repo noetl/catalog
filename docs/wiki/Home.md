@@ -1,3 +1,25 @@
+> ## ⚠⚠ THIS PAGE IS STAGED, NOT PUBLISHED
+>
+> The `noetl/catalog` **wiki git repository does not exist yet**. `has_wiki=true` in the
+> repo settings, but `git ls-remote https://github.com/noetl/catalog.wiki.git` returns
+> **`Repository not found`** — GitHub only creates the wiki repo once the **first page is
+> saved through the web UI**. That is a one-time manual step and cannot be done from a
+> clone or the API.
+>
+> **To publish this content:**
+>
+> 1. Open <https://github.com/noetl/catalog/wiki> and click **Create the first page**.
+> 2. Save anything (a single line is enough) — that initialises `catalog.wiki.git`.
+> 3. Then it can be cloned and this file pushed as `Home.md`:
+>    ```
+>    git clone https://github.com/noetl/catalog.wiki.git
+>    cp docs/wiki/Home.md catalog.wiki/Home.md && cd catalog.wiki
+>    git add Home.md && git commit -m "Home" && git push
+>    ```
+>
+> Until step 1 happens, the wiki is **empty** and this file is the only copy. Nothing here
+> claims otherwise.
+
 # noetl/catalog
 
 **Last refreshed:** 2026-10-06 (repo created; design spec and P1 model types landed)
@@ -123,6 +145,76 @@ count is 0; when P2 lands the four `c1..c4` datasets it becomes exactly 4 and mu
 **stay 4** however many resource types exist. If a resource type ever needs its own
 dataset, the model has regressed to the per-type-table shape this repo exists to
 remove.
+
+## Scope, as of 2026-10-07
+
+**A generic catalog for noetl's own internal object types, stored in EHDB, reachable only
+through `/api/catalog/*`. No SQL surface of any kind.**
+
+The object types are **noetl's six**, discovered from `noetl.resource` — which seeds five
+rows and is the FK target of `noetl.catalog.kind` — plus `subscription` de facto:
+
+| type | `executable` | `catalog` |
+| :-- | :-- | :-- |
+| `playbook` | true | true |
+| `credential` | false | true |
+| `mcp` | false | true |
+| `agent` | true | true |
+| `memory` | false | true |
+| `subscription` | true | true (⚠ not seeded — noetl/ai-meta#446) |
+
+Those flags map onto `ResourceType`'s `executable` / `catalogued` exactly, which is why
+those two fields exist.
+
+⚠ **There is no allowlist.** Ingest previously gated on
+`matches!(type_name, "playbook" | "subscription")`, which rejected **four of noetl's own
+six types**. Every kind now registers; a type the run has never seen is **reported**, not
+refused — so nothing is silently dropped and nothing is silently invented.
+
+⚠⚠ **A resource type is not a tool kind.** `ToolKind` has **25** variants governing
+`tool.kind` inside a step, and `agent`/`mcp` are *rejected* tool kinds while being valid
+resource types (noetl/ai-meta#447).
+
+### adiona is inspiration only
+
+Its relational/EAV patterns shaped the model — the one-polymorphic-identity fix for its
+"new table per entity type" flaw, the EAV collapse, the self-referencing taxonomy, the
+typed value union. Its **schema is not mapped in**, and the acceptance proof is **not** an
+adiona slice. Consciously dropped: the SQL DDL-parser crate, the adiona round-trip proof,
+and localization as a worked feature (the `lang` dimension exists, is inert for noetl
+objects, and is not built on).
+
+## The API — the only interface
+
+```
+GET  /api/catalog/health
+POST /api/catalog/types                  declare an object type       (auth)
+GET  /api/catalog/types                  known noetl types + declared-here
+GET  /api/catalog/types/{name}
+POST /api/catalog/objects                register an object           (auth)
+GET  /api/catalog/objects?type=X         query by type
+GET  /api/catalog/objects/{*path}        latest + every version
+POST /api/catalog/attributes             set an attribute             (auth)
+GET  /api/catalog/attributes/{*path}
+GET  /api/catalog/by-attribute?name=N    query by attribute   (reverse)
+POST /api/catalog/relations              assert an edge               (auth)
+GET  /api/catalog/relations/{*path}      query by relation
+GET  /api/catalog/relations-to/{*path}   query by reverse relation
+POST /api/catalog/tick                   EHDB lifecycle               (auth)
+GET  /metrics
+```
+
+Writes require the internal bearer token: **503** when unconfigured — a privileged surface
+gets no permissive default — and **403** on a missing, malformed or mismatched header,
+constant-time compared. Reads are open; the mutation is what is privileged.
+
+⚠ **Every read returns the full set with its count, never a page**, and that is
+RED-proven at the HTTP boundary: crippling a fold makes the API return **200 OK carrying
+`1 of 7`**. Not an error, not empty — a plausible list.
+
+⚠ Writes serialize behind a mutex. Not a shortcut — the honest shape of EHDB's
+single-writer assumption (`shard_count = 1`, no authoritative election, and
+`append_writer_assigned` needs a monotonic sequence two writers would interleave).
 
 ## Reads: the three indexes, and why none of them is a fifth dataset
 

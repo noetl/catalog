@@ -1,5 +1,24 @@
 # Design spec — a generalized catalog of NoETL internal resources, on EHDB
 
+> ## ⚠ CURRENT SCOPE — read this before anything below
+>
+> **A generic catalog for noetl's own internal object types, stored in EHDB, reachable
+> ONLY through `/api/catalog/*`. No SQL surface of any kind.**
+>
+> * **The object types are noetl's six**, discovered from `noetl.resource` rather than
+>   invented: `playbook`, `credential`, `mcp`, `agent`, `memory`, `subscription` (§2.10).
+>   There is **no allowlist** — any type catalogues with no code change.
+> * **adiona is inspiration only** (§3). Its relational/EAV patterns shaped the model; its
+>   schema is **not** mapped in, and the acceptance proof is **not** an adiona slice.
+> * **Four datasets, and that number does not move** — AC3 asserts the `Dataset` impl count
+>   is exactly four. Three reverse indexes exist and none added a dataset.
+> * **Consciously dropped:** the SQL DDL-parser crate, the adiona round-trip acceptance
+>   proof, and localization as a worked feature (§2.9).
+>
+> Sections written before this scope was settled survive below for their reasoning; where
+> they disagree with this banner, **the banner is current**.
+
+
 | | |
 | :-- | :-- |
 | **Status** | `draft` — open questions resolved by stated assumption, see [§12](#12-assumptions-made-without-the-user) |
