@@ -10,6 +10,14 @@ name: CI
 #
 # Shape copied from noetl/ehdb's ci.yml, which is the one repo in the fleet whose
 # clippy step is a genuine `-D warnings` gate.
+#
+# ⚠ `rust` is a REQUIRED status check on `main`. Two consequences, both learned here:
+#   * A bot commit that carries `[skip ci]` can never be pushed to `main`, because the
+#     required check never RUNS on it and stays "expected" forever (GH006). That is why
+#     semantic-release has no `@semantic-release/git` plugin.
+#   * A PR with no run at all is BLOCKED rather than failing, which looks like a review
+#     problem rather than a CI problem. If a PR shows zero checks, the workflow did not
+#     trigger — look there first, not at branch protection.
 
 on:
   pull_request:
